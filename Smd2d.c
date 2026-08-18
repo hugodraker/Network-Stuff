@@ -15,7 +15,7 @@
  *              ENCRYPTION, OR SECURITY MECHANISMS ARE IMPLEMENTED.
  *  
  *  COMPILATION INSTRUCTIONS (MinGW-w64 on Windows):
- *      gcc smb2d.c -o "C:\masm32\PACS-SERVER01\smb2d.exe" -lws2_32 -lole32
+ *      gcc -o smb2server.exe smb2server.c -lwsock32 -lws2_32
  *      
  *  COMPILATION INSTRUCTIONS (Cross-compile from Linux):
  *      x86_64-w64-mingw32-gcc -static -o smb2server.exe smb2server.c -lwsock32 -lws2_32
@@ -62,8 +62,6 @@
 #include <ws2tcpip.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <signal.h> /* <-- ADDED MISSING HEADER */
-#include <winerror.h> /* <-- ADD THIS LINE */
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -108,10 +106,6 @@
 #define SMB2_QUERY_INFO       0x0010
 #define SMB2_SET_INFO         0x0011
 #define SMB2_OPLOCK_BREAK     0x0012
-
-#ifndef ERROR_FILE_NOT_FOUND
-#define ERROR_FILE_NOT_FOUND 2L
-#endif
 
 /* NT Status Codes (stub - partial list) */
 #define STATUS_SUCCESS              0x00000000
@@ -460,7 +454,7 @@ typedef struct {
 
 typedef struct {
     SOCKET      Socket;
-    struct sockaddr_in Address; /* <-- ADDED struct KEYWORD */
+    sockaddr_in Address;
     ConnectionState_t State;
     uint64_t    SessionId;
     uint64_t    TreeId;
@@ -671,7 +665,7 @@ static int HandleNegotiate(ClientContext_t *ctx, const Smb2Header_t *req_hdr,
     if (g_Config.VerboseLogging) {
         printf("NEGOTIATE: SecurityMode=%u, Dialects=%u\n", 
                neg_req->SecurityMode,
-               (unsigned int)((payload_len - sizeof(Smb2NegotiateRequest_t)) / sizeof(uint16_t)));
+               (payload_len - sizeof(Smb2NegotiateRequest_t)) / sizeof(uint16_t));
     }
     
     ctx->State = STATE_NEGOTIATING;
@@ -887,7 +881,7 @@ static int HandleCreate(ClientContext_t *ctx, const Smb2Header_t *req_hdr,
     strncat(ctx->OpenFiles[slot].Path, "\\", MAX_PATH_LEN - strlen(ctx->OpenFiles[slot].Path) - 1);
     size_t pos = strlen(ctx->OpenFiles[slot].Path);
     WideCharToMultiByte(CP_UTF8, 0, filename_utf16, -1, 
-                       ctx->OpenFiles[slot].Path + pos, (int)(MAX_PATH_LEN - pos), NULL, NULL);
+                       ctx->OpenFiles[slot].Path + pos, MAX_PATH_LEN - pos, NULL, NULL);
     
     /* Determine access modes based on create disposition */
     DWORD desired_access = 0;
@@ -924,15 +918,13 @@ static int HandleCreate(ClientContext_t *ctx, const Smb2Header_t *req_hdr,
     ctx->OpenFiles[slot].IsDirectory = is_directory;
     
     /* Open the file */
-    wchar_t *wide_path = Utf8ToWide(ctx->OpenFiles[slot].Path);
-    HANDLE hFile = CreateFileW(wide_path,
+    HANDLE hFile = CreateFileW(Utf8ToWide(ctx->OpenFiles[slot].Path),
                                desired_access,
                                share_mode,
                                NULL,
                                creation_disposition,
                                file_attributes,
                                NULL);
-    free(wide_path);
     
     if (hFile == INVALID_HANDLE_VALUE) {
         FreeFileSlot(ctx, slot);
@@ -1110,7 +1102,7 @@ static int HandleRead(ClientContext_t *ctx, const Smb2Header_t *req_hdr,
     
     if (g_Config.VerboseLogging) {
         printf("READ: Offset=%llu Len=%u Read=%u\n", 
-               (unsigned long long)offset, length, (unsigned int)bytes_read);
+               (unsigned long long)offset, length, bytes_read);
     }
     
     return SendWithLog(ctx->Socket, outbuf, SMB2_HEADER_SIZE + sizeof(Smb2ReadResponse_t) + bytes_read, 1);
@@ -1170,7 +1162,7 @@ static int HandleWrite(ClientContext_t *ctx, const Smb2Header_t *req_hdr,
     
     if (g_Config.VerboseLogging) {
         printf("WRITE: Offset=%llu Len=%u Written=%u\n",
-               (unsigned long long)offset, length, (unsigned int)bytes_written);
+               (unsigned long long)offset, length, bytes_written);
     }
     
     return SendWithLog(ctx->Socket, outbuf, SMB2_HEADER_SIZE + sizeof(Smb2WriteResponse_t), 1);
@@ -1299,7 +1291,7 @@ static int HandleQueryDirectory(ClientContext_t *ctx, const Smb2Header_t *req_hd
     
     resp->StructureSize = sizeof(Smb2QueryDirectoryResponse_t);
     resp->OutputBufferOffset = sizeof(Smb2QueryDirectoryResponse_t);
-    resp->OutputBufferLength = (uint32_t)info_offset;
+    resp->OutputBufferLength = info_offset;
     
     if (g_Config.VerboseLogging) {
         printf("QUERY_DIRECTORY: Entries enumerated\n");
@@ -1522,7 +1514,7 @@ static int ProcessSmb2Packet(ClientContext_t *ctx, const uint8_t *buf, size_t bu
  *  Client Connection Handler
  * ============================================================================ */
 
-static void HandleClientConnection(SOCKET client_sock, const struct sockaddr_in *addr) { /* <-- ADDED struct KEYWORD */
+static void HandleClientConnection(SOCKET client_sock, const sockaddr_in *addr) {
     printf("Connection from %s:%u\n", inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
     
     /* Create client context */
@@ -1595,255 +1587,5 @@ static void HandleClientConnection(SOCKET client_sock, const struct sockaddr_in 
     free(receive_buffer);
     closesocket(client_sock);
     
-    /* <-- FIXED FORMATTING CORRUPTION BELOW --> */
-    /* Free any remaining open files */
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (ctx.OpenFiles[i].IsOpen && ctx.OpenFiles[i].hFile != INVALID_HANDLE_VALUE) {
-            CloseHandle(ctx.OpenFiles[i].hFile);
-            ctx.OpenFiles[i].hFile = INVALID_HANDLE_VALUE;
-            ctx.OpenFiles[i].IsOpen = 0;
-        }
-    }
-    printf("Connection closed.\n");
-}
+/* Free any remaining open files */ for (int i = 0; i < MAX_OPEN_FILES; i++) { if (ctx.OpenFiles[i].IsOpen && ctx.OpenFiles[i].hFile != INVALID_HANDLE_VALUE) { CloseHandle(ctx.OpenFiles[i].hFile); ctx.OpenFiles[i].hFile = INVALID_HANDLE_VALUE; ctx.OpenFiles[i].IsOpen = 0; } } printf("Connection closed.\n"); DeleteCriticalSection(&g_FileMutex); } /* ============================================================================ * Command Line Parsing * ============================================================================ */ static void PrintUsage(const char *progname) { printf("Usage: %s [OPTIONS]\n", progname); printf("\nOptions:\n"); printf(" -p, --port PORT Set listening port (default: %d)\n", DEFAULT_PORT); printf(" -s, --share PATH Set shared directory path (default: %s)\n", DEFAULT_SHARE_PATH); printf(" -r, --readonly Enable read-only mode\n"); printf(" -v, --verbose Enable verbose logging\n"); printf(" -h, --help Show this help message\n"); printf("\nExamples:\n"); printf(" %s -p 4455 -s /tmp/share -v\n", progname); printf(" %s --readonly --verbose\n", progname); } static int ParseArguments(int argc, char *argv[]) { for (int i = 1; i < argc; i++) { if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { PrintUsage(argv[0]); exit(0); } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) { if (i + 1 >= argc) { fprintf(stderr, "Error: --port requires an argument\n"); return -1; } g_Config.Port = (uint16_t)atoi(argv[++i]); if (g_Config.Port < 1 || g_Config.Port > 65535) { fprintf(stderr, "Error: Invalid port number (1-65535)\n"); return -1; } } else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--share") == 0) { if (i + 1 >= argc) { fprintf(stderr, "Error: --share requires an argument\n"); return -1; } strncpy(g_Config.SharePath, argv[++i], MAX_PATH_LEN - 1); g_Config.SharePath[MAX_PATH_LEN - 1] = '\0'; } else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--readonly") == 0) { g_Config.ShareReadOnly = 1; } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) { g_Config.VerboseLogging = 1; } else { fprintf(stderr, "Unknown option: %s\n", argv[i]); PrintUsage(argv[0]); return -1; } } return 0; } /* ============================================================================ * Signal Handling (Windows compatible) * ============================================================================ */ static void SignalHandler(int sig) { (void)sig; printf("\nShutdown requested...\n"); g_Running = 0; } /* ============================================================================ * Server Initialization * ============================================================================ */ static int InitializeServer(void) { /* Initialize WinSock */ WSADATA wsaData; int result = WSAStartup(MAKEWORD(2, 2), &wsaData); if (result != 0) { fprintf(stderr, "WSAStartup failed: %d\n", result); return -1; } /* Verify WinSock version */ if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) { fprintf(stderr, "WinSock version mismatch\n"); WSACleanup(); return -1; } /* Initialize critical sections */ InitializeCriticalSection(&g_FileMutex); /* Setup signal handlers */ signal(SIGINT, SignalHandler); #ifdef SIGTERM signal(SIGTERM, SignalHandler); #endif /* Verify share directory exists */ DWORD attrs = GetFileAttributesW(Utf8ToWide(g_Config.SharePath)); if (attrs == INVALID_FILE_ATTRIBUTES) { fprintf(stderr, "Warning: Share path '%s' does not exist, creating...\n", g_Config.SharePath); if (!CreateDirectoryA(g_Config.SharePath, NULL)) { fprintf(stderr, "Error: Cannot create share directory '%s'\n", g_Config.SharePath); WSACleanup(); return -1; } } else if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) { fprintf(stderr, "Error: Share path '%s' is not a directory\n", g_Config.SharePath); WSACleanup(); return -1; } printf("Share directory: %s\n", g_Config.SharePath); printf("Port: %u\n", g_Config.Port); printf("Mode: %s\n", g_Config.ShareReadOnly ? "READ ONLY" : "READ-WRITE"); printf("Verbose: %s\n", g_Config.VerboseLogging ? "enabled" : "disabled"); printf("\n"); return 0; } /* ============================================================================ * Main Server Loop * ============================================================================ */ static SOCKET CreateListenSocket(uint16_t port) { SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); if (listen_sock == INVALID_SOCKET) { fprintf(stderr, "socket() failed: %d\n", WSAGetLastError()); return INVALID_SOCKET; } /* Allow socket reuse */ int opt = 1; setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt)); /* Bind to address */ struct sockaddr_in addr = {0}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = htonl(INADDR_ANY); addr.sin_port = htons(port); if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) { fprintf(stderr, "bind() failed: %d\n", WSAGetLastError()); closesocket(listen_sock); return INVALID_SOCKET; } /* Listen for connections */ if (listen(listen_sock, SOMAXCONN) == SOCKET_ERROR) { fprintf(stderr, "listen() failed: %d\n", WSAGetLastError()); closesocket(listen_sock); return INVALID_SOCKET; } return listen_sock; } /* ============================================================================ * Entry Point * ============================================================================ */ int main(int argc, char *argv[]) { printf("\n"); printf("╔══════════════════════════════════════════════════════════════╗\n"); printf("║ SMB2 Server - Public Domain Edition v0.1 ║\n"); printf("╠══════════════════════════════════════════════════════════════╣\n"); printf("║ LICENSE: PUBLIC DOMAIN (NO WARRANTY - NOT FIT FOR USE) ║\n"); printf("║ WARNING: EDUCATIONAL PURPOSES ONLY ║\n"); printf("╚══════════════════════════════════════════════════════════════╝\n"); printf("\n"); /* Parse arguments */ if (ParseArguments(argc, argv) != 0) { return 1; } /* Initialize server */ if (InitializeServer() != 0) { return 1; } /* Create listening socket */ SOCKET listen_sock = CreateListenSocket(g_Config.Port); if (listen_sock == INVALID_SOCKET) { fprintf(stderr, "Failed to create listening socket\n"); WSACleanup(); return 1; } printf("Server started - waiting for connections...\n"); printf("Press Ctrl+C to stop\n\n"); /* Main accept loop */ while (g_Running) { struct sockaddr_in client_addr; socklen_t addr_len = sizeof(client_addr); /* Accept incoming connection */ SOCKET client_sock = accept(listen_sock, (struct sockaddr*)&client_addr, &addr_len); if (client_sock == INVALID_SOCKET) { if (g_Running && WSAGetLastError() != WSAEINTR) { fprintf(stderr, "accept() failed: %d\n", WSAGetLastError()); } continue; } /* Handle client in current thread (could be multithreaded) */ HandleClientConnection(client_sock, &client_addr); } /* Cleanup */ closesocket(listen_sock); DeleteCriticalSection(&g_FileMutex); WSACleanup(); printf("Server shutdown complete.\n"); return 0; } /* ============================================================================ * End of File * ============================================================================ * * NOTES FOR USERS: * * 1. This implementation intentionally lacks authentication to demonstrate * the SMB2 protocol structure. DO NOT DEPLOY IN PRODUCTION. * * 2. Port 445 typically requires administrator/root privileges on most systems. * Consider using a higher port number (e.g., 4455) for testing. * * 3. Windows firewall may block incoming connections on port 445 by default. * * 4. For testing connectivity from another machine: * - net use Z: \\<server-ip>\ipc$ * - Or use smbclient (Linux): smbclient //<server-ip>/share -N * * 5. This code uses blocking sockets. For production use, consider: * - Multithreading (one thread per client) * - IOCP (I/O Completion Ports) on Windows * - select()/poll()/epoll() for event-driven design * * 6. Memory allocation failures are handled minimally. Production code should * implement proper error recovery and resource management. * * 7. File handle leaks are prevented only in normal flow. Exception handling * paths may leave handles open. * * THANK YOU FOR USING PUBLIC DOMAIN SOFTWARE. * FEEL FREE TO MODIFY, REDISTRIBUTE, OR CLAIM AS YOUR OWN. * NO ATTRIBUTION REQUIRED, NO LIABILITY ACCEPTED. * * ========================================================================= */
 
-/* ============================================================================
- *  Command Line Parsing
- * ============================================================================ */
-static void PrintUsage(const char *progname) {
-    printf("Usage: %s [OPTIONS]\n", progname);
-    printf("\nOptions:\n");
-    printf("  -p, --port PORT       Set listening port (default: %d)\n", DEFAULT_PORT);
-    printf("  -s, --share PATH      Set shared directory path (default: %s)\n", DEFAULT_SHARE_PATH);
-    printf("  -r, --readonly        Enable read-only mode\n");
-    printf("  -v, --verbose         Enable verbose logging\n");
-    printf("  -h, --help            Show this help message\n");
-    printf("\nExamples:\n");
-    printf("  %s -p 4455 -s /tmp/share -v\n", progname);
-    printf("  %s --readonly --verbose\n", progname);
-}
-
-static int ParseArguments(int argc, char *argv[]) {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            PrintUsage(argv[0]);
-            exit(0);
-        } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Error: --port requires an argument\n");
-                return -1;
-            }
-            g_Config.Port = (uint16_t)atoi(argv[++i]);
-            if (g_Config.Port < 1 || g_Config.Port > 65535) {
-                fprintf(stderr, "Error: Invalid port number (1-65535)\n");
-                return -1;
-            }
-        } else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--share") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Error: --share requires an argument\n");
-                return -1;
-            }
-            strncpy(g_Config.SharePath, argv[++i], MAX_PATH_LEN - 1);
-            g_Config.SharePath[MAX_PATH_LEN - 1] = '\0';
-        } else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--readonly") == 0) {
-            g_Config.ShareReadOnly = 1;
-        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-            g_Config.VerboseLogging = 1;
-        } else {
-            fprintf(stderr, "Unknown option: %s\n", argv[i]);
-            PrintUsage(argv[0]);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* ============================================================================
- *  Signal Handling (Windows compatible)
- * ============================================================================ */
-static void SignalHandler(int sig) {
-    (void)sig;
-    printf("\nShutdown requested...\n");
-    g_Running = 0;
-}
-
-/* ============================================================================
- *  Server Initialization
- * ============================================================================ */
-static int InitializeServer(void) {
-    /* Initialize WinSock */
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-        fprintf(stderr, "WSAStartup failed: %d\n", result);
-        return -1;
-    }
-
-    /* Verify WinSock version */
-    if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
-        fprintf(stderr, "WinSock version mismatch\n");
-        WSACleanup();
-        return -1;
-    }
-
-    /* Initialize critical sections */
-    InitializeCriticalSection(&g_FileMutex);
-
-    /* Setup signal handlers */
-    signal(SIGINT, SignalHandler);
-#ifdef SIGTERM
-    signal(SIGTERM, SignalHandler);
-#endif
-
-    /* Verify share directory exists */
-    DWORD attrs = GetFileAttributesW(Utf8ToWide(g_Config.SharePath));
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        fprintf(stderr, "Warning: Share path '%s' does not exist, creating...\n", g_Config.SharePath);
-        if (!CreateDirectoryA(g_Config.SharePath, NULL)) {
-            fprintf(stderr, "Error: Cannot create share directory '%s'\n", g_Config.SharePath);
-            WSACleanup();
-            return -1;
-        }
-    } else if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        fprintf(stderr, "Error: Share path '%s' is not a directory\n", g_Config.SharePath);
-        WSACleanup();
-        return -1;
-    }
-
-    printf("Share directory: %s\n", g_Config.SharePath);
-    printf("Port: %u\n", g_Config.Port);
-    printf("Mode: %s\n", g_Config.ShareReadOnly ? "READ ONLY" : "READ-WRITE");
-    printf("Verbose: %s\n", g_Config.VerboseLogging ? "enabled" : "disabled");
-    printf("\n");
-    return 0;
-}
-
-/* ============================================================================
- *  Main Server Loop
- * ============================================================================ */
-static SOCKET CreateListenSocket(uint16_t port) {
-    SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_sock == INVALID_SOCKET) {
-        fprintf(stderr, "socket() failed: %d\n", WSAGetLastError());
-        return INVALID_SOCKET;
-    }
-
-    /* Allow socket reuse */
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
-    /* Bind to address */
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
-    if (bind(listen_sock, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        fprintf(stderr, "bind() failed: %d\n", WSAGetLastError());
-        closesocket(listen_sock);
-        return INVALID_SOCKET;
-    }
-
-    /* Listen for connections */
-    if (listen(listen_sock, SOMAXCONN) == SOCKET_ERROR) {
-        fprintf(stderr, "listen() failed: %d\n", WSAGetLastError());
-        closesocket(listen_sock);
-        return INVALID_SOCKET;
-    }
-
-    return listen_sock;
-}
-
-/* ============================================================================
- *  Entry Point
- * ============================================================================ */
-int main(int argc, char *argv[]) {
-    printf("\n");
-    printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║ SMB2 Server - Public Domain Edition v0.1                     ║\n");
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║ LICENSE: PUBLIC DOMAIN (NO WARRANTY - NOT FIT FOR USE)       ║\n");
-    printf("║ WARNING: EDUCATIONAL PURPOSES ONLY                           ║\n");
-    printf("╚══════════════════════════════════════════════════════════════╝\n");
-    printf("\n");
-
-    /* Parse arguments */
-    if (ParseArguments(argc, argv) != 0) {
-        return 1;
-    }
-
-    /* Initialize server */
-    if (InitializeServer() != 0) {
-        return 1;
-    }
-
-    /* Create listening socket */
-    SOCKET listen_sock = CreateListenSocket(g_Config.Port);
-    if (listen_sock == INVALID_SOCKET) {
-        fprintf(stderr, "Failed to create listening socket\n");
-        WSACleanup();
-        return 1;
-    }
-
-    printf("Server started - waiting for connections...\n");
-    printf("Press Ctrl+C to stop\n\n");
-
-    /* Main accept loop */
-    while (g_Running) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-
-        /* Accept incoming connection */
-        SOCKET client_sock = accept(listen_sock, (struct sockaddr*)&client_addr, &addr_len);
-        if (client_sock == INVALID_SOCKET) {
-            if (g_Running && WSAGetLastError() != WSAEINTR) {
-                fprintf(stderr, "accept() failed: %d\n", WSAGetLastError());
-            }
-            continue;
-        }
-
-        /* Handle client in current thread (could be multithreaded) */
-        HandleClientConnection(client_sock, &client_addr);
-    }
-
-    /* Cleanup */
-    closesocket(listen_sock);
-    DeleteCriticalSection(&g_FileMutex);
-    WSACleanup();
-    printf("Server shutdown complete.\n");
-    return 0;
-}
-
-/* ============================================================================
- *  End of File
- * ============================================================================
- *
- *  NOTES FOR USERS:
- *
- *  1. This implementation intentionally lacks authentication to demonstrate
- *     the SMB2 protocol structure. DO NOT DEPLOY IN PRODUCTION.
- *
- *  2. Port 445 typically requires administrator/root privileges on most systems.
- *     Consider using a higher port number (e.g., 4455) for testing.
- *
- *  3. Windows firewall may block incoming connections on port 445 by default.
- *
- *  4. For testing connectivity from another machine:
- *     - net use Z: \\<server-ip>\ipc$
- *     - Or use smbclient (Linux): smbclient //<server-ip>/share -N
- *
- *  5. This code uses blocking sockets. For production use, consider:
- *     - Multithreading (one thread per client)
- *     - IOCP (I/O Completion Ports) on Windows
- *     - select()/poll()/epoll() for event-driven design
- *
- *  6. Memory allocation failures are handled minimally. Production code should
- *     implement proper error recovery and resource management.
- *
- *  7. File handle leaks are prevented only in normal flow. Exception handling
- *     paths may leave handles open.
- *
- *  THANK YOU FOR USING PUBLIC DOMAIN SOFTWARE.
- *  FEEL FREE TO MODIFY, REDISTRIBUTE, OR CLAIM AS YOUR OWN.
- *  NO ATTRIBUTION REQUIRED, NO LIABILITY ACCEPTED.
- *
- * ========================================================================= */

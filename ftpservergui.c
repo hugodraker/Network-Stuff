@@ -8,7 +8,7 @@
  * breaches caused by the use of this code. Use at your own risk.
  * 
  * COMPILE INSTRUCTIONS:
- * gcc ftp_server.c -o ftp_server.exe -lws2_32 -lcomctl32 -lgdi32
+ * gcc ftpservergui.c -o ftpservergui.exe -lws2_32 -lcomctl32 -lgdi32
  */
 
 #include <stdio.h>
@@ -48,7 +48,12 @@ void setup_passive_socket() {
 
 void send_pasv_response(SOCKET control_socket) {
     struct sockaddr_in addr;
-    socklen_t len = sizeof(addr);
+// Before
+//socklen_t len = sizeof(addr);
+
+// After
+int len = sizeof(addr);
+
     getsockname(data_socket, (struct sockaddr*)&addr, &len);
     unsigned short port = ntohs(addr.sin_port);
     unsigned char *ip = (unsigned char *)&addr.sin_addr;
@@ -132,7 +137,10 @@ DWORD WINAPI ServerThreadProc(LPVOID param) {
 // GUI Helpers
 void UpdateUI() {
     if (!hStatusBtn) return;
-    SendMessage(hStatusBtn, BM_SETTEXT, 0, g_running ? (LPARAM)"STOP SERVER" : (LPARAM)"START SERVER");
+// Before
+//SendMessage(hStatusBtn, BM_SETTEXT, 0, g_running ? (LPARAM)"STOP SERVER" : (LPARAM)"START SERVER");
+// After
+SendMessage(hStatusBtn, WM_SETTEXT, 0, g_running ? (LPARAM)"STOP SERVER" : (LPARAM)"START SERVER");
     SendMessage(hStatusBtn, WM_SETTEXT, 0, 0); // Trigger repaint
     // Simple color update (Requires custom drawing, using basic text for brevity)
     if (g_running) {
@@ -187,7 +195,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
-            nid.cbSize = sizeof(N own);
+// Before
+//nid.cbSize = sizeof(N own);
+// After
+nid.cbSize = sizeof(NOTIFYICONDATA); 
+// Alternatively: nid.cbSize = sizeof(nid);
             nid.hWnd = hwnd;
             nid.uID = 1;
             nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
