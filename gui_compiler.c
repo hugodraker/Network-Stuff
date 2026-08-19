@@ -7,6 +7,35 @@
  * Using MinGW GCC on Windows:
  *   gcc gui_compiler.c -o gui_compiler.exe -mwindows -lcomdlg32
  *
+ * Command Flags:
+ *   -mwindows   : Prevents background console window creation.
+ *   -lcomdlg32  : Links Windows Common Dialog library (Open File Dialog).
+ *
+ * ============================================================================
+ * PUBLIC DOMAIN DEDICATION (Unlicense / CC0 style):
+ *
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
  * ============================================================================
  */
 
@@ -34,74 +63,30 @@ void InitIniPath() {
     GetModuleFileName(NULL, iniPath, MAX_PATH);
     char *lastSlash = strrchr(iniPath, '\\');
     if (lastSlash) *(lastSlash + 1) = '\0';
-    strcat(iniPath, "gui_compiler.ini"); // Changed from config.ini
+    strcat(iniPath, "config.ini");
 }
 
 // Load settings from INI
 void LoadSettings() {
     char buffer[MAX_PATH];
-    char keyName[32];
-    
-    // Load GCC Path
     GetPrivateProfileString("Settings", "GCCPath", "C:\\MinGW\\bin", buffer, MAX_PATH, iniPath);
     SetWindowText(hGccPath, buffer);
 
-    // Load file history (up to 15 files)
-    int count = GetPrivateProfileInt("Settings", "FileCount", 0, iniPath);
-    for (int i = 0; i < count; i++) {
-        snprintf(keyName, sizeof(keyName), "File%d", i);
-        GetPrivateProfileString("Settings", keyName, "", buffer, MAX_PATH, iniPath);
-        if (strlen(buffer) > 0) {
-            SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
-        }
-    }
-
-    // Restore the file that was actively selected last time
-    GetPrivateProfileString("Settings", "LastSelected", "", buffer, MAX_PATH, iniPath);
+    GetPrivateProfileString("Settings", "LastFile", "", buffer, MAX_PATH, iniPath);
     if (strlen(buffer) > 0) {
-        SetWindowText(hFileCombo, buffer);
-    } else if (count > 0) {
-        SendMessage(hFileCombo, CB_SETCURSEL, 0, 0); // Default to first item if exist
+        SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
+        SendMessage(hFileCombo, CB_SETCURSEL, 0, 0);
     }
 }
 
 // Save settings to INI
 void SaveSettings() {
     char buffer[MAX_PATH];
-    char keyName[32];
-    
-    // Save GCC Path
     GetWindowText(hGccPath, buffer, MAX_PATH);
     WritePrivateProfileString("Settings", "GCCPath", buffer, iniPath);
 
-    // Get current text in the combo box. If it's not in the list, add it.
     GetWindowText(hFileCombo, buffer, MAX_PATH);
-    if (strlen(buffer) > 0) {
-        LRESULT idx = SendMessage(hFileCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)buffer);
-        if (idx == CB_ERR) {
-            // Add typed string to dropdown history
-            idx = SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
-        }
-        // Force the combobox to select this item to update the UI visually
-        SendMessage(hFileCombo, CB_SETCURSEL, idx, 0);
-    }
-
-    // Save combo box history (limit to 15 to keep INI clean)
-    int count = (int)SendMessage(hFileCombo, CB_GETCOUNT, 0, 0);
-    int maxSave = (count > 15) ? 15 : count;
-    
-    snprintf(buffer, sizeof(buffer), "%d", maxSave);
-    WritePrivateProfileString("Settings", "FileCount", buffer, iniPath);
-
-    for (int i = 0; i < maxSave; i++) {
-        SendMessage(hFileCombo, CB_GETLBTEXT, i, (LPARAM)buffer);
-        snprintf(keyName, sizeof(keyName), "File%d", i);
-        WritePrivateProfileString("Settings", keyName, buffer, iniPath);
-    }
-    
-    // Save currently selected/typed text
-    GetWindowText(hFileCombo, buffer, MAX_PATH);
-    WritePrivateProfileString("Settings", "LastSelected", buffer, iniPath);
+    WritePrivateProfileString("Settings", "LastFile", buffer, iniPath);
 }
 
 // Copy output text box contents to Windows Clipboard
@@ -127,43 +112,23 @@ void CopyOutputToClipboard(HWND hwndOwner) {
     }
 }
 
-// Robust header command parser: scans first 30 lines directly for "gcc " or "g++ "
+// Scan the first 5 lines of the C file for a custom compile command
+// Expected format: // CMD: gcc my_file.c -o my_file.exe -O3
 int GetHeaderCommand(const char* filepath, char* outCmd, size_t outSize) {
     FILE *f = fopen(filepath, "r");
     if (!f) return 0;
 
-    char line[1024];
+    char line[512];
     int found = 0;
-
-    // Scan up to 30 lines to accommodate large license/header comments
-    for (int i = 0; i < 30 && fgets(line, sizeof(line), f); i++) {
-        // Look for gcc or g++
-        char *cmdPtr = strstr(line, "gcc ");
-        if (!cmdPtr) cmdPtr = strstr(line, "g++ ");
-        
-        // If found, and it looks like a real compile command
-        if (cmdPtr && (strstr(cmdPtr, ".c") || strstr(cmdPtr, ".cpp") || strstr(cmdPtr, "-o "))) {
-            
-            strncpy(outCmd, cmdPtr, outSize - 1);
-            outCmd[outSize - 1] = '\0';
-
-            // Strip trailing newlines/carriage returns
-            outCmd[strcspn(outCmd, "\r\n")] = 0;
-
-            // Strip trailing block comment close "*/" if present
-            char *commentEnd = strstr(outCmd, "*/");
-            if (commentEnd) *commentEnd = '\0';
-
-            // Trim trailing whitespace
-            int len = (int)strlen(outCmd);
-            while (len > 0 && (outCmd[len - 1] == ' ' || outCmd[len - 1] == '\t')) {
-                outCmd[--len] = '\0';
-            }
-
-            if (len > 0) {
-                found = 1;
-                break;
-            }
+    for (int i = 0; i < 5 && fgets(line, sizeof(line), f); i++) {
+        char *cmdPtr = strstr(line, "// CMD:");
+        if (cmdPtr) {
+            cmdPtr += 7; // Skip "// CMD:"
+            while (*cmdPtr == ' ') cmdPtr++; // trim leading space
+            strncpy(outCmd, cmdPtr, outSize);
+            outCmd[strcspn(outCmd, "\r\n")] = 0; // trim newline
+            found = 1;
+            break;
         }
     }
     fclose(f);
@@ -183,10 +148,9 @@ void CompileFile() {
     char gccPath[MAX_PATH];
     GetWindowText(hGccPath, gccPath, MAX_PATH);
 
-    // 2. Scan file header for custom compile command
-    char compileCmd[1024];
+    // 2. Scan for header command or construct default
+    char compileCmd[512];
     if (!GetHeaderCommand(filepath, compileCmd, sizeof(compileCmd))) {
-        // Default command if no header directive is found
         char outExe[MAX_PATH];
         strcpy(outExe, filepath);
         char *dot = strrchr(outExe, '.');
@@ -195,20 +159,23 @@ void CompileFile() {
         snprintf(compileCmd, sizeof(compileCmd), "gcc \"%s\" -o \"%s\"", filepath, outExe);
     }
 
-    // 3. Prepend PATH in subshell execution
-    char fullCmd[3072];
+    // 3. Prepend PATH directly in the cmd execution string
+    // Format: set "PATH=<gccPath>;%PATH%" && <compileCmd> 2>&1
+    char fullCmd[2048];
     snprintf(fullCmd, sizeof(fullCmd), "set \"PATH=%s;%%PATH%%\" && %s 2>&1", gccPath, compileCmd);
 
     SetWindowText(hOutput, "Compiling...\r\n");
     FILE *pipe = _popen(fullCmd, "r");
     if (!pipe) {
-        SetWindowText(hOutput, "Error: Failed to launch command process.");
+        SetWindowText(hOutput, "Error: Failed to launch cmd pipe.");
         return;
     }
 
     char buffer[1024];
-    char outputLog[16384] = "";
-    snprintf(outputLog, sizeof(outputLog), "Command: %s\r\n\r\n", compileCmd);
+    char outputLog[8192] = "";
+    strcat(outputLog, "Command: ");
+    strcat(outputLog, compileCmd);
+    strcat(outputLog, "\r\n\r\n");
 
     while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
         if (strlen(outputLog) + strlen(buffer) < sizeof(outputLog) - 1) {
@@ -227,6 +194,7 @@ void CompileFile() {
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
+            // Create a large font for 5" screens
             hLargeFont = CreateFont(28, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, 
                                     DEFAULT_PITCH | FF_SWISS, "Segoe UI");
@@ -256,19 +224,23 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
             int pad = 10;
-            int rowH = 50; 
+            int rowH = 50; // Big touch targets
 
+            // Row 1: GCC Path
             MoveWindow(hGccPath, pad, pad, width - (pad*2), rowH, TRUE);
             
+            // Row 2: File Dropdown & Browse
             int btnW = 120;
             MoveWindow(hFileCombo, pad, pad*2 + rowH, width - (pad*3) - btnW, rowH, TRUE);
             MoveWindow(hBtnBrowse, width - pad - btnW, pad*2 + rowH, btnW, rowH, TRUE);
 
+            // Row 3: Action Buttons (3 equal-width columns)
             int thirdW = (width - (pad*4)) / 3;
             MoveWindow(hBtnEdit,    pad,               pad*3 + rowH*2, thirdW, rowH*1.5, TRUE);
             MoveWindow(hBtnCompile, pad*2 + thirdW,     pad*3 + rowH*2, thirdW, rowH*1.5, TRUE);
             MoveWindow(hBtnCopy,    pad*3 + thirdW*2,   pad*3 + rowH*2, thirdW, rowH*1.5, TRUE);
 
+            // Row 4: Output Log
             int outY = pad*4 + rowH*3.5;
             MoveWindow(hOutput, pad, outY, width - (pad*2), height - outY - pad, TRUE);
             return 0;
@@ -283,16 +255,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 ofn.hwndOwner = hwnd;
                 ofn.lpstrFile = szFile;
                 ofn.nMaxFile = sizeof(szFile);
-                ofn.lpstrFilter = "C Source Files\0*.c;*.cpp\0All Files\0*.*\0";
+                ofn.lpstrFilter = "C Source Files\0*.c\0All Files\0*.*\0";
                 ofn.nFilterIndex = 1;
+                ofn.lpstrFileTitle = NULL;
+                ofn.nMaxFileTitle = 0;
+                ofn.lpstrInitialDir = NULL;
                 ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
                 if (GetOpenFileName(&ofn) == TRUE) {
-                    LRESULT idx = SendMessage(hFileCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)szFile);
-                    if (idx == CB_ERR) { 
-                        idx = SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)szFile);
-                    }
-                    SendMessage(hFileCombo, CB_SETCURSEL, idx, 0);
+                    SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)szFile);
+                    SendMessage(hFileCombo, CB_SETCURSEL, SendMessage(hFileCombo, CB_GETCOUNT, 0, 0) - 1, 0);
                     SaveSettings();
                 }
             }
@@ -304,7 +276,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             else if (LOWORD(wParam) == ID_BTN_COMPILE) {
-                SaveSettings(); // Captures typed path, adds to dropdown, selects it, saves INI
+                SaveSettings();
                 CompileFile();
             }
             else if (LOWORD(wParam) == ID_BTN_COPY) {
