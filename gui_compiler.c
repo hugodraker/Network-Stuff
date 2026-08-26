@@ -37,9 +37,12 @@
 #define ID_OUTPUT 107
 #define ID_BTN_RUN 108
 #define ID_ARGS 109
+#define ID_BTN_BACKUP 110 // Add this line
+#define ID_BTN_PASTE 111
 
-// Global Variables
-HWND hGccPath, hFileCombo, hBtnBrowse, hBtnEdit, hBtnCompile, hBtnCopy, hOutput, hBtnRun, hArgs;
+// Update your Global Variables list to include hBtnPaste:
+HWND hGccPath, hFileCombo, hBtnBrowse, hBtnEdit, hBtnCompile, hBtnCopy, hOutput, hBtnRun, hArgs, hBtnBackup, hBtnPaste;
+
 HFONT hLargeFont;
 char iniPath[MAX_PATH];
 
@@ -48,19 +51,34 @@ void InitIniPath() {
     GetModuleFileName(NULL, iniPath, MAX_PATH);
     char *lastSlash = strrchr(iniPath, '\\');
     if (lastSlash) *(lastSlash + 1) = '\0';
-    strcat(iniPath, "config.ini");
+    strcat(iniPath, "gui_compiler.ini"); // Updated filename
 }
-
 // Load settings from INI
 void LoadSettings() {
     char buffer[MAX_PATH];
     GetPrivateProfileString("Settings", "GCCPath", "C:\\MinGW\\bin", buffer, MAX_PATH, iniPath);
     SetWindowText(hGccPath, buffer);
 
+    // Load file history into the dropdown
+    int count = GetPrivateProfileInt("Settings", "HistoryCount", 0, iniPath);
+    for (int i = 0; i < count; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "File%d", i);
+        GetPrivateProfileString("History", key, "", buffer, MAX_PATH, iniPath);
+        if (strlen(buffer) > 0) {
+            SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
+        }
+    }
+
+    // Load the most recently used file
     GetPrivateProfileString("Settings", "LastFile", "", buffer, MAX_PATH, iniPath);
     if (strlen(buffer) > 0) {
-        SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
-        SendMessage(hFileCombo, CB_SETCURSEL, 0, 0);
+        // Only add it if it doesn't already exist in the history list
+        int idx = SendMessage(hFileCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)buffer);
+        if (idx == CB_ERR) {
+            idx = SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)buffer);
+        }
+        SendMessage(hFileCombo, CB_SETCURSEL, idx, 0);
         
         // Load arguments for this specific file
         char argsBuf[1024];
@@ -79,11 +97,70 @@ void SaveSettings() {
     GetWindowText(hFileCombo, fileBuf, MAX_PATH);
     WritePrivateProfileString("Settings", "LastFile", fileBuf, iniPath);
 
+    // Save combo box history (limit to 15 items)
+    int count = SendMessage(hFileCombo, CB_GETCOUNT, 0, 0);
+    if (count > 15) count = 15; 
+    
+    char countStr[16];
+    snprintf(countStr, sizeof(countStr), "%d", count);
+    WritePrivateProfileString("Settings", "HistoryCount", countStr, iniPath);
+    
+    // Clear out the old history section before writing new keys
+    WritePrivateProfileSection("History", "", iniPath); 
+    
+    for (int i = 0; i < count; i++) {
+        char historyBuf[MAX_PATH];
+        char key[16];
+        SendMessage(hFileCombo, CB_GETLBTEXT, i, (LPARAM)historyBuf);
+        snprintf(key, sizeof(key), "File%d", i);
+        WritePrivateProfileString("History", key, historyBuf, iniPath);
+    }
+
+    // Save current file's arguments
     if (strlen(fileBuf) > 0) {
         char argsBuf[1024];
         GetWindowText(hArgs, argsBuf, sizeof(argsBuf));
         WritePrivateProfileString("Args", fileBuf, argsBuf, iniPath);
     }
+}
+
+void PasteClipboardToFile(HWND hwndOwner) {
+    char filepath[MAX_PATH];
+    GetWindowText(hFileCombo, filepath, MAX_PATH);
+    if (strlen(filepath) == 0) {
+        SetWindowText(hOutput, "Error: No file selected to overwrite.");
+        return;
+    }
+
+    if (!IsClipboardFormatAvailable(CF_TEXT)) {
+        SetWindowText(hOutput, "Error: No text found in clipboard.");
+        return;
+    }
+
+    if (!OpenClipboard(hwndOwner)) {
+        SetWindowText(hOutput, "Error: Could not open clipboard.");
+        return;
+    }
+
+    HGLOBAL hMem = GetClipboardData(CF_TEXT);
+    if (hMem != NULL) {
+        char *pText = (char*)GlobalLock(hMem);
+        if (pText != NULL) {
+            FILE *f = fopen(filepath, "w");
+            if (f) {
+                fputs(pText, f);
+                fclose(f);
+                
+                char logMsg[MAX_PATH + 64];
+                snprintf(logMsg, sizeof(logMsg), "Success: Overwrote file with clipboard contents:\r\n%s", filepath);
+                SetWindowText(hOutput, logMsg);
+            } else {
+                SetWindowText(hOutput, "Error: Could not open file for writing. It might be in use.");
+            }
+            GlobalUnlock(hMem);
+        }
+    }
+    CloseClipboard();
 }
 
 // Copy output text box contents to Windows Clipboard
@@ -116,24 +193,29 @@ int GetHeaderCommand(const char* filepath, char* outCmd, size_t outSize) {
 
     char line[1024];
     int found = 0;
-    for (int i = 0; i < 20 && fgets(line, sizeof(line), f); i++) {
-        char *gccPtr = strstr(line, "gcc");
-        if (gccPtr) {
-            // Ensure 'gcc' is standalone or part of a command line (preceded by space, tab, or comment chars)
+    
+    // Increased scan limit to 40 lines
+    for (int i = 0; i < 40 && fgets(line, sizeof(line), f); i++) {
+        char *cmdPtr = strstr(line, "gcc");
+        if (!cmdPtr) {
+            cmdPtr = strstr(line, "wcl");
+        }
+
+        if (cmdPtr) {
             int valid = 0;
-            if (gccPtr == line) {
+            if (cmdPtr == line) {
                 valid = 1;
             } else {
-                char prev = *(gccPtr - 1);
+                char prev = *(cmdPtr - 1);
                 if (prev == ' ' || prev == '\t' || prev == '*' || prev == '/') {
                     valid = 1;
                 }
             }
 
             if (valid) {
-                strncpy(outCmd, gccPtr, outSize);
+                strncpy(outCmd, cmdPtr, outSize);
                 outCmd[outSize - 1] = '\0'; 
-                outCmd[strcspn(outCmd, "\r\n")] = 0; // trim newline
+                outCmd[strcspn(outCmd, "\r\n")] = 0; 
                 found = 1;
                 break;
             }
@@ -141,9 +223,7 @@ int GetHeaderCommand(const char* filepath, char* outCmd, size_t outSize) {
     }
     fclose(f);
     return found;
-}
-
-// Compile the selected file
+}// Compile the selected file
 void CompileFile() {
     char filepath[MAX_PATH];
     GetWindowText(hFileCombo, filepath, MAX_PATH);
@@ -177,21 +257,76 @@ void CompileFile() {
 
     char buffer[1024];
     char outputLog[16384] = "";
-    strcat(outputLog, "Command: ");
+    
+    strcpy(outputLog, "Command: ");
     strcat(outputLog, compileCmd);
     strcat(outputLog, "\r\n\r\n");
 
+    // Track length to prevent O(N^2) performance hits during the while loop
+    size_t currentLen = strlen(outputLog);
+    size_t maxLen = sizeof(outputLog) - 1;
+
     while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        if (strlen(outputLog) + strlen(buffer) < sizeof(outputLog) - 1) {
-            strcat(outputLog, buffer);
+        size_t bufLen = strlen(buffer);
+        if (currentLen + bufLen < maxLen) {
+            strcpy(outputLog + currentLen, buffer); // Append exactly at the end
+            currentLen += bufLen;
         }
     }
     
     int exitCode = _pclose(pipe);
-    if (exitCode == 0) strcat(outputLog, "\r\n[Success] Compiled with 0 errors.");
-    else strcat(outputLog, "\r\n[Failed] Compilation encountered errors.");
+    
+    // Safely append final success/fail messages
+    const char* successMsg = "\r\n[Success] Compiled with 0 errors.";
+    const char* failMsg = "\r\n[Failed] Compilation encountered errors.";
+    const char* finalMsg = (exitCode == 0) ? successMsg : failMsg;
+    
+    if (currentLen + strlen(finalMsg) < maxLen) {
+        strcpy(outputLog + currentLen, finalMsg);
+    }
     
     SetWindowText(hOutput, outputLog);
+}
+void BackupFile() {
+    char filepath[MAX_PATH];
+    GetWindowText(hFileCombo, filepath, MAX_PATH);
+    if (strlen(filepath) == 0) {
+        SetWindowText(hOutput, "Error: No file selected to backup.");
+        return;
+    }
+
+    char base[MAX_PATH];
+    char ext[32];
+    strcpy(base, filepath);
+    
+    // Find the last dot to separate the extension
+    char *dot = strrchr(base, '.');
+    if (dot) {
+        strcpy(ext, dot);
+        *dot = '\0'; 
+    } else {
+        strcpy(ext, "");
+    }
+
+    char backupPath[MAX_PATH];
+    int counter = 1;
+    
+    // Loop until we find a filename that doesn't exist yet
+    while (1) {
+        snprintf(backupPath, sizeof(backupPath), "%s%d%s", base, counter, ext);
+        if (GetFileAttributes(backupPath) == INVALID_FILE_ATTRIBUTES) {
+            break; 
+        }
+        counter++;
+    }
+
+    if (CopyFile(filepath, backupPath, FALSE)) {
+        char logMsg[1024];
+        snprintf(logMsg, sizeof(logMsg), "Backup created successfully:\r\n%s", backupPath);
+        SetWindowText(hOutput, logMsg);
+    } else {
+        SetWindowText(hOutput, "Error: Failed to create backup file.");
+    }
 }
 
 // Window Procedure
@@ -210,6 +345,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hBtnCompile= CreateWindow("BUTTON", "COMPILE", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)ID_BTN_COMPILE, NULL, NULL);
             hBtnRun    = CreateWindow("BUTTON", "RUN EXE", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)ID_BTN_RUN, NULL, NULL);
             hBtnCopy   = CreateWindow("BUTTON", "Copy Log", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)ID_BTN_COPY, NULL, NULL);
+hBtnBackup = CreateWindow("BUTTON", "Backup", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)ID_BTN_BACKUP, NULL, NULL);
+// Add this line where the other buttons are created
+            hBtnPaste = CreateWindow("BUTTON", "Paste", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)ID_BTN_PASTE, NULL, NULL);
+
             hOutput    = CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0, 0, 0, 0, hwnd, (HMENU)ID_OUTPUT, NULL, NULL);
 
             SendMessage(hGccPath, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
@@ -221,6 +360,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             SendMessage(hBtnRun, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
             SendMessage(hBtnCopy, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
             SendMessage(hOutput, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
+            SendMessage(hBtnBackup, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
+            SendMessage(hBtnPaste, WM_SETFONT, (WPARAM)hLargeFont, TRUE);
 
             InitIniPath();
             LoadSettings();
@@ -244,15 +385,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // Row 3: Command Line Args
             MoveWindow(hArgs, pad, pad*3 + rowH*2, width - (pad*2), rowH, TRUE);
 
-            // Row 4: Action Buttons (4 equal-width columns)
-            int quarterW = (width - (pad*5)) / 4;
+            int sixthW = (width - (pad*7)) / 6;
             int btnY = pad*4 + rowH*3;
             int btnH = (int)(rowH * 1.2);
-            MoveWindow(hBtnEdit,    pad,                  btnY, quarterW, btnH, TRUE);
-            MoveWindow(hBtnCompile, pad*2 + quarterW,     btnY, quarterW, btnH, TRUE);
-            MoveWindow(hBtnRun,     pad*3 + quarterW*2,   btnY, quarterW, btnH, TRUE);
-            MoveWindow(hBtnCopy,    pad*4 + quarterW*3,   btnY, width - (pad*5) - (quarterW*3), btnH, TRUE);
-
+            MoveWindow(hBtnEdit,    pad,                  btnY, sixthW, btnH, TRUE);
+            MoveWindow(hBtnCompile, pad*2 + sixthW,       btnY, sixthW, btnH, TRUE);
+            MoveWindow(hBtnRun,     pad*3 + sixthW*2,     btnY, sixthW, btnH, TRUE);
+            MoveWindow(hBtnBackup,  pad*4 + sixthW*3,     btnY, sixthW, btnH, TRUE);
+            MoveWindow(hBtnPaste,   pad*5 + sixthW*4,     btnY, sixthW, btnH, TRUE);
+            MoveWindow(hBtnCopy,    pad*6 + sixthW*5,     btnY, width - (pad*7) - (sixthW*5), btnH, TRUE);
             // Row 5: Output Log
             int outY = btnY + btnH + pad;
             MoveWindow(hOutput, pad, outY, width - (pad*2), height - outY - pad, TRUE);
@@ -271,7 +412,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     SetWindowText(hArgs, argsBuf);
                 }
             }
-            else if (LOWORD(wParam) == ID_BTN_BROWSE) {
+else if (LOWORD(wParam) == ID_BTN_BROWSE) {
                 OPENFILENAME ofn;
                 char szFile[MAX_PATH] = {0};
                 ZeroMemory(&ofn, sizeof(ofn));
@@ -284,8 +425,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
                 if (GetOpenFileName(&ofn) == TRUE) {
-                    SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)szFile);
-                    SendMessage(hFileCombo, CB_SETCURSEL, SendMessage(hFileCombo, CB_GETCOUNT, 0, 0) - 1, 0);
+                    // Check if file is already in the list to prevent duplicates
+                    int idx = SendMessage(hFileCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)szFile);
+                    if (idx == CB_ERR) {
+                        // Not found, append to the bottom
+                        idx = SendMessage(hFileCombo, CB_ADDSTRING, 0, (LPARAM)szFile);
+                    }
+                    SendMessage(hFileCombo, CB_SETCURSEL, idx, 0);
                     
                     char argsBuf[1024];
                     GetPrivateProfileString("Args", szFile, "", argsBuf, sizeof(argsBuf), iniPath);
@@ -330,6 +476,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             else if (LOWORD(wParam) == ID_BTN_COPY) {
                 CopyOutputToClipboard(hwnd);
+            }
+else if (LOWORD(wParam) == ID_BTN_BACKUP) {
+                BackupFile();
+            }
+else if (LOWORD(wParam) == ID_BTN_PASTE) {
+                PasteClipboardToFile(hwnd);
             }
             return 0;
         }
