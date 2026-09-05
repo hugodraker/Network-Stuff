@@ -376,11 +376,7 @@ static char g_ren_base[MAX_SMB_PATH];
 static char g_ren_item[MAX_SMB_PATH];
 char g_conn_log[8192] = "Application Started.\r\n";
 HWND g_hToolTip = NULL;
-static WNDPROC OldDlgEditProc;
 
-/* ==========================================================================
-   FORWARD DECLARATIONS (STRICT ORDERING)
-   ========================================================================== */
 /* ==========================================================================
    FORWARD DECLARATIONS (STRICT ORDERING)
    ========================================================================== */
@@ -395,6 +391,8 @@ static void get_random_bytes(uint8_t *buf, size_t len);
 static void load_config(HWND hwnd);
 static void save_config(HWND hwnd);
 static void disconnect_all(void);
+
+static int connect_with_timeout(SOCKET sock, struct sockaddr *addr, int addrlen);
 
 static int smb_send_packet(const void *data, size_t len);
 static int smb_recv_packet(uint8_t *buffer, size_t max_len, size_t *out_len);
@@ -452,90 +450,11 @@ static void do_action(int action);
 
 static WNDPROC OldListProc;
 static LRESULT CALLBACK ListSubProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+BOOL CALLBACK SetFontEnumProc(HWND hwnd, LPARAM lParam);
 
 /* ==========================================================================
    UTILITY FUNCTIONS
    ========================================================================== */
-static LRESULT CALLBACK DlgEditSubProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
-        HWND hParent = GetParent(hwnd);
-        int ctrl_id = GetDlgCtrlID(hwnd);
-        if (ctrl_id == IDE_RENAME_NEW) SendMessageA(hParent, WM_COMMAND, IDB_RENAME_OK, 0);
-        else if (ctrl_id == IDE_MKDIR_NAME) SendMessageA(hParent, WM_COMMAND, IDB_MKDIR_OK, 0);
-        else SendMessageA(hParent, WM_COMMAND, IDB_SAVE, 0); 
-        return 0; 
-    }
-    if (msg == WM_CHAR && wp == VK_RETURN) return 0; 
-    return CallWindowProc(OldDlgEditProc, hwnd, msg, wp, lp);
-}
-BOOL CALLBACK SetFontEnumProc(HWND hwnd, LPARAM lParam) {
-    SendMessage(hwnd, WM_SETFONT, (WPARAM)lParam, TRUE);
-    return TRUE;
-}
-static int connect_ftp(ConnectionProfile *p) {
-    disconnect_all(); g_app.hInternet = InternetOpenA("DualPaneClient", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0); if (!g_app.hInternet) return 0;
-    const char *ftp_user = (p->user[0] != '\0') ? p->user : NULL; const char *ftp_pass = (p->pass[0] != '\0') ? p->pass : NULL;
-    INTERNET_PORT ftp_port = INTERNET_DEFAULT_FTP_PORT; if (p->port[0] != '\0') { int parsed = atoi(p->port); if (parsed > 0) ftp_port = (INTERNET_PORT)parsed; }
-    g_app.hFtpSession = InternetConnectA(g_app.hInternet, p->server, ftp_port, ftp_user, ftp_pass, INTERNET_SERVICE_FTP, INTERNET_FLAG_PASSIVE, 0);
-    if (!g_app.hFtpSession) { InternetCloseHandle(g_app.hInternet); g_app.hInternet = NULL; return 0; }
-    g_app.conn_type = CONN_FTP; normalize_path(p->share, 1);
-    char ftp_path[MAX_SMB_PATH_LEN] = "/"; if (p->share[0] != '\0') snprintf(ftp_path, sizeof(ftp_path), "/%s", p->share); normalize_path(ftp_path, 1);
-    strncpy(g_app.remote_base, ftp_path, MAX_SMB_PATH_LEN-1);
-    if (strcmp(g_app.remote_base, "/") != 0) { if (!FtpSetCurrentDirectoryA(g_app.hFtpSession, g_app.remote_base)) { strcpy(g_app.remote_base, "/"); FtpSetCurrentDirectoryA(g_app.hFtpSession, "/"); } }
-    list_remote(); return 1;
-}
-static int connect_server(ConnectionProfile *p) {
-    disconnect_all(); WSADATA wd; WSAStartup(MAKEWORD(2,2), &wd);
-    struct addrinfo hints={0}, *res; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
-    char *conn_port = (p->port[0] != '\0') ? p->port : "445";
-    if (getaddrinfo(p->server, conn_port, &hints, &res) != 0) { add_log("Host lookup failed."); return 0; }
-    g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (connect(g_app.sconn, res->ai_addr, res->ai_addrlen) != 0) { add_log("Socket conn failed"); freeaddrinfo(res); return 0; }
-    
-    char full_share[MAX_SMB_PATH]; strcpy(full_share, p->share); normalize_path(full_share, 0); 
-    char share_root[128] = ""; char sub_dir[MAX_SMB_PATH] = "\\";
-    char *first_slash = strchr(full_share, '\\'); if (first_slash == full_share) first_slash = strchr(full_share + 1, '\\');
-    if (first_slash) { int root_len = first_slash - full_share; if (full_share[0] == '\\') { root_len = first_slash - (full_share + 1); strncpy(share_root, full_share + 1, root_len); } else strncpy(share_root, full_share, root_len); share_root[root_len] = '\0'; strcpy(sub_dir, first_slash); } else { if (full_share[0] == '\\') strcpy(share_root, full_share + 1); else strcpy(share_root, full_share); }
-
-    int try_smb2 = (p->proto_pref == PROTO_SMB2 || p->proto_pref == PROTO_AUTO);
-    int try_smb1 = (p->proto_pref == PROTO_SMB1 || p->proto_pref == PROTO_AUTO);
-    
-    if (try_smb2) {
-        add_log("Connecting via SMB2...");
-        if (smb2_negotiate()) {
-            if (smb2_session_setup(p->user, p->pass)) {
-                if (smb2_tree_connect(p->server, share_root)) {
-                    g_app.conn_type = CONN_SMB; g_app.current_proto = PROTO_SMB2; strcpy(g_app.remote_base, sub_dir); list_remote(); add_log("Connected via SMB2"); freeaddrinfo(res); return 1;
-                }
-            } 
-        }
-        closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol); connect(g_app.sconn, res->ai_addr, res->ai_addrlen);
-    }
-    
-    if (try_smb1) {
-        add_log("Connecting via SMB1...");
-        g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1;
-        if (smb_negotiate()) {
-            int auth_success = smb_session(p->user, p->pass);
-            if (!auth_success && (strlen(p->user) > 0 || strlen(p->pass) > 0)) {
-                closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                if (connect(g_app.sconn, res->ai_addr, res->ai_addrlen) == 0) { g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1; if (smb_negotiate()) auth_success = smb_session("", ""); }
-            }
-            if (auth_success) {
-                if (smb_tree_connect(p->server, share_root)) { g_app.conn_type = CONN_SMB; g_app.current_proto = PROTO_SMB1; strcpy(g_app.remote_base, sub_dir); list_remote(); add_log("Connected via SMB1"); freeaddrinfo(res); return 1; } 
-            }
-        } 
-    }
-    freeaddrinfo(res); return 0;
-}
-static int create_remote_dir(const char *rpath) {
-    if (g_app.conn_type == CONN_FTP) return ftp_mkdir_ex("", rpath);
-    if (g_app.conn_type == CONN_SMB) {
-        if (g_app.current_proto == PROTO_SMB1) return smb_mkdir_ex("", rpath);
-        if (g_app.current_proto == PROTO_SMB2) return smb2_mkdir(rpath);
-    }
-    return 0;
-}
 static int compare_local_items(const void *a, const void *b) {
     const DirectoryItem *itemA = (const DirectoryItem *)a;
     const DirectoryItem *itemB = (const DirectoryItem *)b;
@@ -608,6 +527,39 @@ static void get_random_bytes(uint8_t *buf, size_t len) {
 }
 
 /* ==========================================================================
+   NETWORK TIMEOUT UTILITY
+   ========================================================================== */
+static int connect_with_timeout(SOCKET sock, struct sockaddr *addr, int addrlen) {
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+    if (connect(sock, addr, addrlen) == SOCKET_ERROR) {
+        if (WSAGetLastError() != WSAEWOULDBLOCK) return 0;
+    }
+    
+    fd_set fdset;
+    FD_ZERO(&fdset);
+    FD_SET(sock, &fdset);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 50000; /* 50ms Timeout */
+    
+    if (select(0, NULL, &fdset, NULL, &tv) == 1) {
+        int so_error = 0;
+        int len = sizeof(so_error);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&so_error, &len);
+        if (so_error == 0) {
+            mode = 0;
+            ioctlsocket(sock, FIONBIO, &mode);
+            DWORD timeout = 50; /* Ensure operations timeout fast too */
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ==========================================================================
    CONFIG LOAD/SAVE
    ========================================================================== */
 static void load_config(HWND hwnd) {
@@ -633,14 +585,8 @@ static void load_config(HWND hwnd) {
             sprintf(key, "Share%d", i); GetPrivateProfileStringA("Connections", key, "", g_app.connections[i].share, 128, g_ini_path);
             sprintf(key, "User%d", i); GetPrivateProfileStringA("Connections", key, "", g_app.connections[i].user, 64, g_ini_path);
             sprintf(key, "Pass%d", i); GetPrivateProfileStringA("Connections", key, "", g_app.connections[i].pass, 64, g_ini_path);
-            
-            /* FIX: Correctly format the string before reading the INI value */
-            sprintf(key, "IsFTP%d", i); 
-            g_app.connections[i].is_ftp = GetPrivateProfileIntA("Connections", key, 0, g_ini_path);
-            
-            sprintf(key, "Proto%d", i); 
-            g_app.connections[i].proto_pref = GetPrivateProfileIntA("Connections", key, PROTO_AUTO, g_ini_path);
-            
+            sprintf(key, "IsFTP%d", i); g_app.connections[i].is_ftp = GetPrivateProfileIntA("Connections", key, 0, g_ini_path);
+            sprintf(key, "Proto%d", i); g_app.connections[i].proto_pref = GetPrivateProfileIntA("Connections", key, PROTO_AUTO, g_ini_path);
             sprintf(key, "SharesHist%d", i); GetPrivateProfileStringA("Connections", key, "", g_app.connections[i].shares_hist, 512, g_ini_path);
         }
     }
@@ -726,10 +672,10 @@ static int smb_negotiate(void) {
     const char *dialects[] = { "PC NETWORK PROGRAM 1.0", "MICROSOFT NETWORKS 3.0", "DOS LM1.2X002", "DOS LANMAN2.1", "Windows for Workgroups 3.1a", "NT LM 0.12" };
     *w++ = 0; uint8_t *bcc_ptr = w; w += 2; 
     for (int i = 0; i < 6; i++) { *w++ = 0x02; strcpy((char*)w, dialects[i]); w += strlen(dialects[i]) + 1; }
-    *(uint16_t*)bcc_ptr = (w - bcc_ptr) - 2; add_log("SMB1: Negotiating legacy dialects...");
+    *(uint16_t*)bcc_ptr = (w - bcc_ptr) - 2;
     if (!smb_send_packet(pkt, w - pkt)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
-    uint32_t status = ((SMB1Header*)pkt)->status; if (status == 0) add_log("SMB1: Negotiation SUCCESS");
+    uint32_t status = ((SMB1Header*)pkt)->status; 
     return (status == 0);
 }
 
@@ -738,7 +684,6 @@ static int smb_session(const char *user, const char *pass) {
     char domain[64] = "WORKGROUP"; char uname[64] = ""; const char *slash = strchr(user, '\\');
     if (slash) { size_t dlen = slash - user; if (dlen < sizeof(domain)) { strncpy(domain, user, dlen); domain[dlen] = '\0'; } strcpy(uname, slash + 1); } 
     else { strcpy(uname, user); }
-    add_log("SMB1: Session Setup (WCT=10) for '%s\\%s'...", domain, uname[0] ? uname : "ANONYMOUS");
     *w++ = 10; *w++ = 0xFF; *w++ = 0; *(uint16_t*)w = 0; w += 2; *(uint16_t*)w = 65535; w += 2; *(uint16_t*)w = 2; w += 2; *(uint16_t*)w = 1; w += 2; *(uint32_t*)w = 0; w += 4;     
     uint16_t pass_len = strlen(pass); *(uint16_t*)w = pass_len ? pass_len + 1 : 1; w += 2; *(uint32_t*)w = 0; w += 4;                           
     uint8_t *bcc_ptr = w; w += 2; uint8_t *data_start = w;
@@ -749,8 +694,6 @@ static int smb_session(const char *user, const char *pass) {
     if (!smb_send_packet(pkt, w - pkt)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
     g_app.uid = ((SMB1Header*)pkt)->uid; uint32_t status = ((SMB1Header*)pkt)->status;
-    if (status == 0) add_log("SMB1: Session established. UID: %d", g_app.uid);
-    else add_log("SMB1: Session setup failed. NT Status: 0x%08X", status);
     return (status == 0);
 }
 
@@ -764,11 +707,9 @@ static int smb_tree_connect(const char *server, const char *share) {
     uint8_t path_utf16[MAX_SMB_PATH * 2]; size_t path_len_utf16 = utf8_to_utf16le(path, path_utf16, sizeof(path_utf16));
     uint16_t byte_count = 1 + path_len_utf16 + 2 + 6; *(uint16_t*)w = byte_count; w += 2; *w++ = 0;                      
     memcpy(w, path_utf16, path_len_utf16); w += path_len_utf16; *w++ = 0; *w++ = 0; strcpy((char*)w, "?????"); w += 6; 
-    add_log("SMB1: Tree Connect (Unicode) to %s...", path);
     if (!smb_send_packet(pkt, w - pkt)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
     g_app.tid = ((SMB1Header*)pkt)->tid; uint32_t status = ((SMB1Header*)pkt)->status;
-    if (status == 0) add_log("SMB1: Tree Connect OK. TID: %d", g_app.tid); else add_log("SMB1: Tree Connect failed. NT Status: 0x%08X", status);
     return (status == 0);
 }
 
@@ -852,13 +793,13 @@ static int smb2_negotiate(void) {
     size_t recv_len; if (!smb_recv_packet(packet, sizeof(packet), &recv_len)) return 0;
     hdr = (SMB2Header*)packet; if (hdr->status != 0 && hdr->status != STATUS_SUCCESS) return 0;
     SMB2NegotiateResp *resp = (SMB2NegotiateResp*)(packet + sizeof(SMB2Header));
-    memcpy(g_app.smb2_server_guid, resp->server_guid, 16); add_log("SMB2 protocol negotiated (dialect 0x%x)", resp->dialect_revision);
+    memcpy(g_app.smb2_server_guid, resp->server_guid, 16); 
     return 1;
 }
 
 static int smb2_session_setup(const char *user, const char *pass) {
     HMODULE hSec = LoadLibraryA("secur32.dll");
-    if (!hSec) { add_log("SMB2: Failed to load secur32.dll"); return 0; }
+    if (!hSec) return 0;
     INIT_SECURITY_INTERFACE_A pInitSec = (INIT_SECURITY_INTERFACE_A)GetProcAddress(hSec, "InitSecurityInterfaceA");
     if (!pInitSec) { FreeLibrary(hSec); return 0; }
     PSecurityFunctionTableA sspi = pInitSec();
@@ -905,7 +846,7 @@ static int smb2_session_setup(const char *user, const char *pass) {
     if (!smb_recv_packet(response, sizeof(response), &recv_len)) goto cleanup;
     
     hdr = (SMB2Header*)response;
-    if (hdr->status != STATUS_MORE_PROCESSING) { add_log("SMB2: NTLM Type 1 rejected. Status: 0x%08X", hdr->status); goto cleanup; }
+    if (hdr->status != STATUS_MORE_PROCESSING) goto cleanup;
     g_app.smb2_session_id = hdr->session_id;
     
     uint16_t sec_offset = *(uint16_t*)(response + 68); uint16_t sec_len = *(uint16_t*)(response + 70);
@@ -917,7 +858,7 @@ static int smb2_session_setup(const char *user, const char *pass) {
     
     out_buf.cbBuffer = sizeof(sec_payload); out_buf.pvBuffer = sec_payload;
     stat = sspi->InitializeSecurityContextA(&hCred, &hCtx, (SEC_CHAR*)target_name, req_flags, 0, SECURITY_NATIVE_DREP, &in_desc, 0, &hCtx, &out_desc, &ctx_attrs, &ts);
-    if (stat != SEC_E_OK) { add_log("SMB2: SSPI NTLM Type 3 generation failed."); goto cleanup; }
+    if (stat != SEC_E_OK) goto cleanup;
     
     memset(packet, 0, sizeof(packet)); hdr = (SMB2Header*)packet; smb2_init_header(hdr, SMB2_SESSION_SETUP);
     hdr->session_id = g_app.smb2_session_id;
@@ -1095,14 +1036,14 @@ static int enumerate_shares(char (*shares)[64], int max_shares, int is_smb2_capa
     int count = 0;
     if (is_smb2_capable) {
         count = smb2_ipc_enum_shares(g_app.pending_server, shares, max_shares);
-        if (count > 0) { add_log("Found %d share(s) via SMB2 SRVSVC", count); return count; }
+        if (count > 0) return count;
     }
     count = enum_shares_ipc(shares, max_shares);
-    if (count > 0) { add_log("Found %d share(s) via MS-RAP IPC$", count); return count; }
+    if (count > 0) return count;
     char *fallback_shares[] = {"shared", "public", "data", "files", "documents", "home"};
     int num_fallback = sizeof(fallback_shares) / sizeof(fallback_shares[0]);
     for (int i = 0; i < num_fallback && i < max_shares; i++) strcpy(shares[i], fallback_shares[i]);
-    add_log("Native enumeration failed, using common share names"); return num_fallback;
+    return num_fallback;
 }
 
 /* ==========================================================================
@@ -1117,109 +1058,56 @@ static void format_folder_path(char *dst, size_t max_len, const char *base_dir, 
     strncpy(clean_new, new_dir, sizeof(clean_new) - 1);
     clean_new[sizeof(clean_new) - 1] = '\0';
     
-    for (char *p = clean_new; *p; ++p) {
-        if (*p == wrong) *p = sep;
-    }
+    for (char *p = clean_new; *p; ++p) { if (*p == wrong) *p = sep; }
 
-    if (!base_dir || base_dir[0] == '\0' || 
-        ((base_dir[0] == '/' || base_dir[0] == '\\') && base_dir[1] == '\0')) {
-        const char *np = clean_new;
-        while (*np == sep) np++;
-        if (is_ftp) {
-            snprintf(dst, max_len, "/%s", np);
-        } else {
-            snprintf(dst, max_len, "\\%s", np);
-        }
+    if (!base_dir || base_dir[0] == '\0' || ((base_dir[0] == '/' || base_dir[0] == '\\') && base_dir[1] == '\0')) {
+        const char *np = clean_new; while (*np == sep) np++;
+        if (is_ftp) snprintf(dst, max_len, "/%s", np); else snprintf(dst, max_len, "\\%s", np);
     } else {
-        char clean_base[MAX_SMB_PATH_LEN];
-        strncpy(clean_base, base_dir, sizeof(clean_base) - 1);
-        clean_base[sizeof(clean_base) - 1] = '\0';
-        for (char *p = clean_base; *p; ++p) {
-            if (*p == wrong) *p = sep;
-        }
-
-        size_t blen = strlen(clean_base);
-        while (blen > 0 && clean_base[blen - 1] == sep) {
-            clean_base[--blen] = '\0';
-        }
-
-        const char *np = clean_new;
-        while (*np == sep) np++;
-
+        char clean_base[MAX_SMB_PATH_LEN]; strncpy(clean_base, base_dir, sizeof(clean_base) - 1); clean_base[sizeof(clean_base) - 1] = '\0';
+        for (char *p = clean_base; *p; ++p) { if (*p == wrong) *p = sep; }
+        size_t blen = strlen(clean_base); while (blen > 0 && clean_base[blen - 1] == sep) { clean_base[--blen] = '\0'; }
+        const char *np = clean_new; while (*np == sep) np++;
         snprintf(dst, max_len, "%s%c%s", clean_base, sep, np);
     }
 }
 
-static int smb_mkdir_ex(const char *parent_dir, const char *dirname)
-{
-    char target_path[MAX_SMB_PATH];
-    format_folder_path(target_path, sizeof(target_path), parent_dir, dirname, 0);
-
-    uint8_t pkt[MAX_SMB_PATH + 100];
-    memset(pkt, 0, sizeof(pkt));
-    smb_build_header(pkt, 0x00);
-
-    uint8_t *w = pkt + sizeof(SMB1Header);
-    *w++ = 0;
-
-    uint16_t byte_count = (uint16_t)(strlen(target_path) + 2);
-    *(uint16_t*)w = byte_count; w += 2;
-    *w++ = 0x04; 
-    strcpy((char*)w, target_path);
-    w += strlen(target_path) + 1;
-
+static int smb_mkdir_ex(const char *parent_dir, const char *dirname) {
+    char target_path[MAX_SMB_PATH]; format_folder_path(target_path, sizeof(target_path), parent_dir, dirname, 0);
+    uint8_t pkt[MAX_SMB_PATH + 100]; memset(pkt, 0, sizeof(pkt)); smb_build_header(pkt, 0x00);
+    uint8_t *w = pkt + sizeof(SMB1Header); *w++ = 0;
+    uint16_t byte_count = (uint16_t)(strlen(target_path) + 2); *(uint16_t*)w = byte_count; w += 2; *w++ = 0x04; strcpy((char*)w, target_path); w += strlen(target_path) + 1;
     if (!smb_send_packet(pkt, w - pkt)) return 0;
-    size_t rlen;
-    if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
-
+    size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
     uint32_t status = ((SMB1Header*)pkt)->status;
-    if (status == 0 || status == 0xC0000035) {
-        add_log("SMB1: Created directory %s", target_path);
-        return 1;
-    }
-    add_log("SMB1: Failed to create directory %s (Status: 0x%08X)", target_path, status);
-    return 0;
+    if (status == 0 || status == 0xC0000035) return 1; return 0;
 }
 
-static int ftp_mkdir_ex(const char *parent_dir, const char *dirname)
-{
-    char target_path[MAX_SMB_PATH];
-    format_folder_path(target_path, sizeof(target_path), parent_dir, dirname, 1);
-
-    if (FtpCreateDirectoryA(g_app.hFtpSession, target_path)) {
-        add_log("FTP: Created directory %s", target_path);
-        return 1;
-    }
-    DWORD err = GetLastError();
-    if (err == ERROR_ALREADY_EXISTS) return 1;
-
-    add_log("FTP: Create directory %s failed (Error: %lu)", target_path, err);
-    return 0;
+static int ftp_mkdir_ex(const char *parent_dir, const char *dirname) {
+    char target_path[MAX_SMB_PATH]; format_folder_path(target_path, sizeof(target_path), parent_dir, dirname, 1);
+    if (FtpCreateDirectoryA(g_app.hFtpSession, target_path)) return 1;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) return 1; return 0;
 }
 
 static int smb2_list_directory(void) {
     uint8_t packet[SMB_BUFFER_SIZE]; memset(packet, 0, sizeof(packet));
     SMB2Header *hdr = (SMB2Header*)packet; smb2_init_header(hdr, SMB2_CREATE); hdr->tree_id = g_app.smb2_tree_id;
     SMB2CreateReq *create = (SMB2CreateReq*)(packet + sizeof(SMB2Header));
-    create->structure_size = 57; create->security_flags = 0; create->requested_oplock_level = 0; create->impersonation_level = 2;      
+    create->structure_size = 57; create->impersonation_level = 2;      
     create->desired_access = 0x00100081; create->file_attributes = 0x00000010; create->share_access = 0x00000007; 
     create->create_disposition = 1; create->create_options = 0x00000021; create->name_offset = 120;
-    uint8_t *name_pos = packet + 120;
     
     char rel_path[MAX_SMB_PATH] = "";
     if (g_app.remote_base[0] != '\0' && strcmp(g_app.remote_base, "\\") != 0 && strcmp(g_app.remote_base, "/") != 0) {
         const char *p = g_app.remote_base; if (*p == '\\' || *p == '/') p++;
-        strcpy(rel_path, p);
-        int len = strlen(rel_path); while (len > 0 && (rel_path[len-1] == '\\' || rel_path[len-1] == '/')) { rel_path[len-1] = '\0'; len--; }
+        strcpy(rel_path, p); int len = strlen(rel_path); while (len > 0 && (rel_path[len-1] == '\\' || rel_path[len-1] == '/')) { rel_path[len-1] = '\0'; len--; }
     }
-
-    create->name_length = (uint16_t)utf8_to_utf16le(rel_path, name_pos, SMB_BUFFER_SIZE - create->name_offset);
-    size_t pkt_len = create->name_offset + create->name_length;
-    if (create->name_length == 0) { packet[120] = 0; packet[121] = 0; pkt_len = 122; }
+    create->name_length = (uint16_t)utf8_to_utf16le(rel_path, packet + 120, SMB_BUFFER_SIZE - 120);
+    size_t pkt_len = 120 + create->name_length; if (create->name_length == 0) { packet[120] = 0; packet[121] = 0; pkt_len = 122; }
 
     if (!smb_send_packet(packet, pkt_len)) return 0;
     size_t recv_len; if (!smb_recv_packet(packet, sizeof(packet), &recv_len)) return 0;
-    hdr = (SMB2Header*)packet; if (hdr->status != STATUS_SUCCESS) { add_log("SMB2: Open directory failed. Status: 0x%08X", hdr->status); return 0; }
+    hdr = (SMB2Header*)packet; if (hdr->status != STATUS_SUCCESS) return 0;
 
     SMB2CreateResp *create_resp = (SMB2CreateResp*)(packet + sizeof(SMB2Header));
     uint64_t file_id_pers = create_resp->file_id_persistent; uint64_t file_id_vol  = create_resp->file_id_volatile;
@@ -1229,9 +1117,8 @@ static int smb2_list_directory(void) {
         memset(packet, 0, sizeof(SMB2Header) + 128); hdr = (SMB2Header*)packet; smb2_init_header(hdr, SMB2_QUERY_DIRECTORY); hdr->tree_id = g_app.smb2_tree_id;
         SMB2QueryDirReqFixed *qdir = (SMB2QueryDirReqFixed*)(packet + sizeof(SMB2Header));
         qdir->structure_size = 33; qdir->file_information_class = 37; qdir->flags = first_query ? 0x01 : 0x00; first_query = 0;
-        qdir->file_index = 0; qdir->file_id_persistent = file_id_pers; qdir->file_id_volatile = file_id_vol; qdir->output_buffer_length = 65536;
-        qdir->name_offset = 96; uint8_t *pattern_pos = packet + 96; *(uint16_t*)pattern_pos = '*'; qdir->name_length = 2;
-        pkt_len = qdir->name_offset + qdir->name_length;
+        qdir->file_id_persistent = file_id_pers; qdir->file_id_volatile = file_id_vol; qdir->output_buffer_length = 65536; qdir->name_offset = 96; 
+        *(uint16_t*)(packet + 96) = '*'; qdir->name_length = 2; pkt_len = 96 + 2;
         
         if (!smb_send_packet(packet, pkt_len)) break;
         if (!smb_recv_packet(packet, sizeof(packet), &recv_len)) break;
@@ -1256,40 +1143,27 @@ static int smb2_list_directory(void) {
                     if (next_offset == 0) break; data_ptr += next_offset;
                 }
             } else { keep_querying = 0; }
-        } else {
-            if (hdr->status != 0x80000006) { add_log("SMB2: Query directory failed. Status: 0x%08X", hdr->status); }
-            keep_querying = 0;
-        }
+        } else { keep_querying = 0; }
     }
 
     memset(packet, 0, sizeof(packet)); hdr = (SMB2Header*)packet; smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
     SMB2CloseReq *cl = (SMB2CloseReq*)(packet + sizeof(SMB2Header)); cl->structure_size = 24; 
-    cl->file_id_persistent = file_id_pers; 
-    cl->file_id_volatile = file_id_vol; /* Fixed: was fid_vol */
+    cl->file_id_persistent = file_id_pers; cl->file_id_volatile = file_id_vol; 
     smb_send_packet(packet, sizeof(SMB2Header) + 24); smb_recv_packet(packet, sizeof(packet), &recv_len);
-    add_log("SMB2: Listed %d remote items.", g_app.remote_count - 2); return 1;
+    return 1;
 }
 
 static int smb2_mkdir(const char *rpath) {
     uint8_t pkt[SMB_BUFFER_SIZE]; memset(pkt, 0, sizeof(pkt));
     SMB2Header *hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CREATE); hdr->tree_id = g_app.smb2_tree_id;
     SMB2CreateReq *create = (SMB2CreateReq*)(pkt + sizeof(SMB2Header));
-    create->structure_size = 57; create->impersonation_level = 2; 
-    create->desired_access = 0x00120116; 
-    create->file_attributes = 0x00000010; 
-    create->share_access = 0x07; 
-    create->create_disposition = 2; 
-    create->create_options = 0x00000021; 
-    create->name_offset = 120;
+    create->structure_size = 57; create->impersonation_level = 2; create->desired_access = 0x00120116; 
+    create->file_attributes = 0x00000010; create->share_access = 0x07; create->create_disposition = 2; 
+    create->create_options = 0x00000021; create->name_offset = 120;
     
-    char rel_path[MAX_SMB_PATH]; 
-    const char *p = rpath; 
-    while (*p == '\\' || *p == '/') p++; 
-    strcpy(rel_path, p);
-    
+    char rel_path[MAX_SMB_PATH]; const char *p = rpath; while (*p == '\\' || *p == '/') p++; strcpy(rel_path, p);
     create->name_length = (uint16_t)utf8_to_utf16le(rel_path, pkt + 120, SMB_BUFFER_SIZE - 120);
-    size_t pkt_len = 120 + create->name_length;
-    if (create->name_length == 0) { pkt[120] = 0; pkt[121] = 0; pkt_len = 122; }
+    size_t pkt_len = 120 + create->name_length; if (create->name_length == 0) { pkt[120] = 0; pkt[121] = 0; pkt_len = 122; }
     
     if (!smb_send_packet(pkt, pkt_len)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
@@ -1297,39 +1171,23 @@ static int smb2_mkdir(const char *rpath) {
     
     if (hdr->status == 0 || hdr->status == 0xC0000035) {
         SMB2CreateResp *cresp = (SMB2CreateResp*)(pkt + sizeof(SMB2Header));
-        uint64_t fid_pers = cresp->file_id_persistent; 
-        uint64_t fid_vol = cresp->file_id_volatile;
-        
-        memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; 
-        smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
-        
-        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header));
-        cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
-        
-        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen);
-        return 1;
-    }
-    add_log("SMB2: Mkdir failed. Status: 0x%08X", hdr->status);
-    return 0;
+        uint64_t fid_pers = cresp->file_id_persistent; uint64_t fid_vol = cresp->file_id_volatile;
+        memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
+        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header)); cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
+        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen); return 1;
+    } return 0;
 }
 
 static int smb2_delete_internal(const char* rpath, int is_dir) {
     uint8_t pkt[SMB_BUFFER_SIZE]; memset(pkt, 0, sizeof(pkt));
     SMB2Header *hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CREATE); hdr->tree_id = g_app.smb2_tree_id;
     SMB2CreateReq *create = (SMB2CreateReq*)(pkt + sizeof(SMB2Header));
-    create->structure_size = 57; create->impersonation_level = 2; 
-    create->desired_access = 0x00010000; create->file_attributes = 0;
-    create->share_access = 0x07; create->create_disposition = 1; 
-    create->create_options = 0x00001000 | (is_dir ? 0x00000021 : 0);
-    create->name_offset = 120;
+    create->structure_size = 57; create->impersonation_level = 2; create->desired_access = 0x00010000; create->file_attributes = 0;
+    create->share_access = 0x07; create->create_disposition = 1; create->create_options = 0x00001000 | (is_dir ? 0x00000021 : 0); create->name_offset = 120;
     
-    char rel_path[MAX_SMB_PATH]; const char *p = rpath; 
-    if (*p == '\\' || *p == '/') p++; 
-    strcpy(rel_path, p);
-    
+    char rel_path[MAX_SMB_PATH]; const char *p = rpath; if (*p == '\\' || *p == '/') p++; strcpy(rel_path, p);
     create->name_length = (uint16_t)utf8_to_utf16le(rel_path, pkt + 120, SMB_BUFFER_SIZE - 120);
-    int pkt_len = 120 + create->name_length; 
-    if (create->name_length == 0) { pkt[120]=0; pkt[121]=0; pkt_len=122; }
+    int pkt_len = 120 + create->name_length; if (create->name_length == 0) { pkt[120]=0; pkt[121]=0; pkt_len=122; }
     
     if (!smb_send_packet(pkt, pkt_len)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
@@ -1338,34 +1196,21 @@ static int smb2_delete_internal(const char* rpath, int is_dir) {
     if (hdr->status == 0) {
         SMB2CreateResp *cresp = (SMB2CreateResp*)(pkt + sizeof(SMB2Header));
         uint64_t fid_pers = cresp->file_id_persistent; uint64_t fid_vol = cresp->file_id_volatile;
-        
-        memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; 
-        smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
-        
-        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header)); 
-        cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
-        
-        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen);
-        return 1;
-    }
-    return 0;
+        memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
+        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header)); cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
+        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen); return 1;
+    } return 0;
 }
 
 static int smb2_rename(const char *oldp, const char *newp) {
     uint8_t pkt[SMB_BUFFER_SIZE]; memset(pkt, 0, sizeof(pkt));
     SMB2Header *hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CREATE); hdr->tree_id = g_app.smb2_tree_id;
     SMB2CreateReq *create = (SMB2CreateReq*)(pkt + sizeof(SMB2Header));
-    create->structure_size = 57; create->impersonation_level = 2; 
-    create->desired_access = 0x00110080; create->file_attributes = 0;
+    create->structure_size = 57; create->impersonation_level = 2; create->desired_access = 0x00110080; create->file_attributes = 0;
     create->share_access = 0x07; create->create_disposition = 1; create->create_options = 0; create->name_offset = 120;
-    
-    char rel_path[MAX_SMB_PATH]; const char *p = oldp; 
-    if (*p == '\\' || *p == '/') p++; 
-    strcpy(rel_path, p);
-    
+    char rel_path[MAX_SMB_PATH]; const char *p = oldp; if (*p == '\\' || *p == '/') p++; strcpy(rel_path, p);
     create->name_length = (uint16_t)utf8_to_utf16le(rel_path, pkt + 120, SMB_BUFFER_SIZE - 120);
-    int pkt_len = 120 + create->name_length; 
-    if (create->name_length == 0) { pkt[120]=0; pkt[121]=0; pkt_len=122; }
+    int pkt_len = 120 + create->name_length; if (create->name_length == 0) { pkt[120]=0; pkt[121]=0; pkt_len=122; }
     
     if (!smb_send_packet(pkt, pkt_len)) return 0;
     size_t rlen; if (!smb_recv_packet(pkt, sizeof(pkt), &rlen)) return 0;
@@ -1374,28 +1219,19 @@ static int smb2_rename(const char *oldp, const char *newp) {
     if (hdr->status == 0) {
         SMB2CreateResp *cresp = (SMB2CreateResp*)(pkt + sizeof(SMB2Header));
         uint64_t fid_pers = cresp->file_id_persistent; uint64_t fid_vol = cresp->file_id_volatile;
-        
         memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_SET_INFO); hdr->tree_id = g_app.smb2_tree_id;
         SMB2SetInfoReq *setinfo = (SMB2SetInfoReq*)(pkt + sizeof(SMB2Header));
-        setinfo->structure_size = 33; setinfo->info_type = 1; setinfo->file_info_class = 10; setinfo->buffer_offset = 96;
-        setinfo->file_id_persistent = fid_pers; setinfo->file_id_volatile = fid_vol;
+        setinfo->structure_size = 33; setinfo->info_type = 1; setinfo->file_info_class = 10; setinfo->buffer_offset = 96; setinfo->file_id_persistent = fid_pers; setinfo->file_id_volatile = fid_vol;
         
         uint8_t *buf = pkt + 96; buf[0] = 0; memset(buf+1, 0, 15);
-        char rel_new[MAX_SMB_PATH]; const char *np = newp; 
-        if (*np == '\\' || *np == '/') np++; 
-        strcpy(rel_new, np);
-        
-        uint32_t nlen = (uint32_t)utf8_to_utf16le(rel_new, buf+20, SMB_BUFFER_SIZE - 116);
-        *(uint32_t*)(buf+16) = nlen; setinfo->buffer_length = 20 + nlen;
+        char rel_new[MAX_SMB_PATH]; const char *np = newp; if (*np == '\\' || *np == '/') np++; strcpy(rel_new, np);
+        uint32_t nlen = (uint32_t)utf8_to_utf16le(rel_new, buf+20, SMB_BUFFER_SIZE - 116); *(uint32_t*)(buf+16) = nlen; setinfo->buffer_length = 20 + nlen;
         smb_send_packet(pkt, 96 + setinfo->buffer_length); smb_recv_packet(pkt, sizeof(pkt), &rlen);
         
         memset(pkt, 0, sizeof(pkt)); hdr = (SMB2Header*)pkt; smb2_init_header(hdr, SMB2_CLOSE); hdr->tree_id = g_app.smb2_tree_id;
-        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header)); 
-        cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
-        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen);
-        return 1;
-    }
-    return 0;
+        SMB2CloseReq *cl = (SMB2CloseReq*)(pkt + sizeof(SMB2Header)); cl->structure_size = 24; cl->file_id_persistent = fid_pers; cl->file_id_volatile = fid_vol;
+        smb_send_packet(pkt, sizeof(SMB2Header) + 24); smb_recv_packet(pkt, sizeof(pkt), &rlen); return 1;
+    } return 0;
 }
 
 static int copy_r2l_file(const char *rpath, const char *lpath) {
@@ -1547,6 +1383,15 @@ static int copy_single_l2r(const char *lpath, const char *rpath) {
     return 0;
 }
 
+static int create_remote_dir(const char *rpath) {
+    if (g_app.conn_type == CONN_FTP) return ftp_mkdir_ex("", rpath);
+    if (g_app.conn_type == CONN_SMB) {
+        if (g_app.current_proto == PROTO_SMB1) return smb_mkdir_ex("", rpath);
+        if (g_app.current_proto == PROTO_SMB2) return smb2_mkdir(rpath);
+    }
+    return 0;
+}
+
 static void delete_recursive_local(const char *path) {
     char search[MAX_SMB_PATH]; snprintf(search, sizeof(search), "%s\\*", path);
     WIN32_FIND_DATAA fd; HANDLE hFind = FindFirstFileA(search, &fd);
@@ -1585,9 +1430,7 @@ static void list_remote(void) {
     g_app.remote_count = 0; strcpy(g_app.remote_items[0].path, "."); g_app.remote_items[0].is_dir = 1; strcpy(g_app.remote_items[1].path, ".."); g_app.remote_items[1].is_dir = 1; g_app.remote_count = 2;
     if (g_app.current_proto == PROTO_SMB2) { smb2_list_directory(); } else if (g_app.current_proto == PROTO_SMB1) { smb_list_directory(); }
     else if (g_app.conn_type == CONN_FTP) {
-        WIN32_FIND_DATAA fd; 
-        FtpSetCurrentDirectoryA(g_app.hFtpSession, g_app.remote_base);
-        /* Force FTP reload and use robust * wildcard to prevent empty listing bug on some servers */
+        WIN32_FIND_DATAA fd; FtpSetCurrentDirectoryA(g_app.hFtpSession, g_app.remote_base);
         HINTERNET hFind = FtpFindFirstFileA(g_app.hFtpSession, "*", &fd, INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_RESYNCHRONIZE, 0);
         if (hFind) {
             do {
@@ -1596,8 +1439,7 @@ static void list_remote(void) {
                 strncpy(g_app.remote_items[g_app.remote_count].path, fd.cFileName, MAX_SMB_PATH-1); 
                 g_app.remote_items[g_app.remote_count].is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0; 
                 g_app.remote_count++;
-            } while (InternetFindNextFileA(hFind, &fd));
-            InternetCloseHandle(hFind);
+            } while (InternetFindNextFileA(hFind, &fd)); InternetCloseHandle(hFind);
         }
     }
     update_remote_list();
@@ -1663,9 +1505,6 @@ static void copy_recursive_l2r(const char *lpath, const char *rpath, int is_dir)
     }
 }
 
-/* ==========================================================================
-   MULTI-ITEM UI ACTION HANDLER
-   ========================================================================== */
 static void do_action(int action) {
     int is_remote = (g_app.active_pane == PANE_REMOTE); 
     int is_ftp = (g_app.conn_type == CONN_FTP);
@@ -1684,10 +1523,7 @@ static void do_action(int action) {
         sel_indices = (int*)malloc(sel_count * sizeof(int)); 
         SendMessageA(hList, LB_GETSELITEMS, sel_count, (LPARAM)sel_indices);
     } else {
-        /* Empty selection safely acts on the current directory "." */
-        sel_count = 1;
-        sel_indices = (int*)malloc(sizeof(int));
-        sel_indices[0] = 0; 
+        sel_count = 1; sel_indices = (int*)malloc(sizeof(int)); sel_indices[0] = 0; 
     }
 
     int current_dir_deleted = 0;
@@ -1698,12 +1534,10 @@ static void do_action(int action) {
         
         if (is_remote) { 
             if (idx >= g_app.remote_count) continue;
-            strcpy(item_name, g_app.remote_items[idx].path); 
-            is_dir = g_app.remote_items[idx].is_dir; 
+            strcpy(item_name, g_app.remote_items[idx].path); is_dir = g_app.remote_items[idx].is_dir; 
         } else { 
             if (idx >= g_app.local_count) continue;
-            strcpy(item_name, g_app.local_items[idx].path); 
-            is_dir = g_app.local_items[idx].is_dir; 
+            strcpy(item_name, g_app.local_items[idx].path); is_dir = g_app.local_items[idx].is_dir; 
         }
         
         if (strcmp(item_name, "..") == 0) continue;
@@ -1714,47 +1548,26 @@ static void do_action(int action) {
         int is_current_dir = (strcmp(item_name, ".") == 0);
         
         if (is_current_dir) {
-            char temp_base[MAX_SMB_PATH];
-            strcpy(temp_base, is_remote ? g_app.remote_base : g_app.local_base);
-            int len = strlen(temp_base);
-            while(len > 0 && (temp_base[len-1] == '\\' || temp_base[len-1] == '/')) temp_base[--len] = '\0';
-            
-            char *ls = strrchr(temp_base, '\\');
-            char *ls_f = strrchr(temp_base, '/');
-            if (ls_f > ls) ls = ls_f;
-            
-            if (ls) strcpy(src_folder_name, ls + 1);
-            else strcpy(src_folder_name, temp_base);
-            
-            if (strlen(src_folder_name) == 0 || (src_folder_name[1] == ':' && strlen(src_folder_name) <= 2) || strcmp(src_folder_name, "\\") == 0 || strcmp(src_folder_name, "/") == 0) {
-                add_log("Cannot perform file operation directly on the root directory.");
-                continue;
-            }
+            char temp_base[MAX_SMB_PATH]; strcpy(temp_base, is_remote ? g_app.remote_base : g_app.local_base);
+            int len = strlen(temp_base); while(len > 0 && (temp_base[len-1] == '\\' || temp_base[len-1] == '/')) temp_base[--len] = '\0';
+            char *ls = strrchr(temp_base, '\\'); char *ls_f = strrchr(temp_base, '/'); if (ls_f > ls) ls = ls_f;
+            if (ls) strcpy(src_folder_name, ls + 1); else strcpy(src_folder_name, temp_base);
+            if (strlen(src_folder_name) == 0 || (src_folder_name[1] == ':' && strlen(src_folder_name) <= 2) || strcmp(src_folder_name, "\\") == 0 || strcmp(src_folder_name, "/") == 0) { continue; }
             strcpy(item_name, src_folder_name);
         }
 
         if (is_current_dir) {
-            strcpy(rem_path, g_app.remote_base);
-            strcpy(loc_path, g_app.local_base);
-            
-            if (is_remote) {
-                if (loc_path[strlen(loc_path)-1] != '\\') strcat(loc_path, "\\");
-                strcat(loc_path, item_name);
-            } else {
-                char sep_str[2] = {sep_r, '\0'};
-                if (rem_path[strlen(rem_path)-1] != sep_r) strcat(rem_path, sep_str);
-                strcat(rem_path, item_name);
-            }
+            strcpy(rem_path, g_app.remote_base); strcpy(loc_path, g_app.local_base);
+            if (is_remote) { if (loc_path[strlen(loc_path)-1] != '\\') strcat(loc_path, "\\"); strcat(loc_path, item_name); } 
+            else { char sep_str[2] = {sep_r, '\0'}; if (rem_path[strlen(rem_path)-1] != sep_r) strcat(rem_path, sep_str); strcat(rem_path, item_name); }
         } else {
             if (g_app.remote_base[strlen(g_app.remote_base)-1] == sep_r) snprintf(rem_path, sizeof(rem_path), "%s%s", g_app.remote_base, item_name);
             else snprintf(rem_path, sizeof(rem_path), "%s%c%s", g_app.remote_base, sep_r, item_name);
-            
             if (g_app.local_base[strlen(g_app.local_base)-1] == '\\') snprintf(loc_path, sizeof(loc_path), "%s%s", g_app.local_base, item_name);
             else snprintf(loc_path, sizeof(loc_path), "%s\\%s", g_app.local_base, item_name);
         }
         
-        normalize_path(rem_path, is_ftp);
-        normalize_path(loc_path, 0);
+        normalize_path(rem_path, is_ftp); normalize_path(loc_path, 0);
 
         if (action == ID_BTN_COPY || action == ID_BTN_MOVE) {
             if (is_remote) {
@@ -1777,33 +1590,17 @@ static void do_action(int action) {
                 if (g_app.current_proto == PROTO_SMB1) { if (is_dir) smb_delete_dir(rem_path); else smb_delete(rem_path); } 
                 else if (g_app.current_proto == PROTO_SMB2) { smb2_delete_internal(rem_path, is_dir); } 
                 else if (g_app.conn_type == CONN_FTP) { if (is_dir) FtpRemoveDirectoryA(g_app.hFtpSession, rem_path); else FtpDeleteFileA(g_app.hFtpSession, rem_path); } 
-            } else { 
-                if (is_dir) delete_recursive_local(loc_path); else DeleteFileA(loc_path); 
-            }
+            } else { if (is_dir) delete_recursive_local(loc_path); else DeleteFileA(loc_path); }
             if (is_current_dir) current_dir_deleted = 1;
         } else if (action == ID_BTN_RENAME && s == 0) { 
             if (is_current_dir) {
-                char temp_base[MAX_SMB_PATH];
-                strcpy(temp_base, is_remote ? g_app.remote_base : g_app.local_base);
-                int len = strlen(temp_base);
-                while(len > 0 && (temp_base[len-1] == '\\' || temp_base[len-1] == '/')) temp_base[--len] = '\0';
-                
-                char *ls = strrchr(temp_base, '\\');
-                char *ls_f = strrchr(temp_base, '/');
-                if (ls_f > ls) ls = ls_f;
-                
-                if (ls) {
-                    *ls = '\0';
-                    strcpy(g_ren_base, temp_base);
-                    if (strlen(g_ren_base) == 0) strcpy(g_ren_base, is_remote ? (is_ftp ? "/" : "\\") : "C:\\");
-                } else {
-                    strcpy(g_ren_base, is_remote ? (is_ftp ? "/" : "\\") : "C:\\"); 
-                }
+                char temp_base[MAX_SMB_PATH]; strcpy(temp_base, is_remote ? g_app.remote_base : g_app.local_base);
+                int len = strlen(temp_base); while(len > 0 && (temp_base[len-1] == '\\' || temp_base[len-1] == '/')) temp_base[--len] = '\0';
+                char *ls = strrchr(temp_base, '\\'); char *ls_f = strrchr(temp_base, '/'); if (ls_f > ls) ls = ls_f;
+                if (ls) { *ls = '\0'; strcpy(g_ren_base, temp_base); if (strlen(g_ren_base) == 0) strcpy(g_ren_base, is_remote ? (is_ftp ? "/" : "\\") : "C:\\"); } 
+                else { strcpy(g_ren_base, is_remote ? (is_ftp ? "/" : "\\") : "C:\\"); }
                 strcpy(g_ren_item, item_name);
-            } else {
-                strcpy(g_ren_base, is_remote ? g_app.remote_base : g_app.local_base); 
-                strcpy(g_ren_item, item_name);
-            }
+            } else { strcpy(g_ren_base, is_remote ? g_app.remote_base : g_app.local_base); strcpy(g_ren_item, item_name); }
             CreateWindowExA(WS_EX_DLGMODALFRAME, "RenameClass", "Rename Item", WS_VISIBLE|WS_POPUP|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 300, 110, g_app.hMain, NULL, g_hInst, NULL); 
             EnableWindow(g_app.hMain, FALSE);
         }
@@ -1813,82 +1610,169 @@ static void do_action(int action) {
     
     if (current_dir_deleted) {
         if (is_remote) {
-            char sep = is_ftp ? '/' : '\\';
-            char *ls = strrchr(g_app.remote_base, sep);
+            char sep = is_ftp ? '/' : '\\'; char *ls = strrchr(g_app.remote_base, sep);
             if (ls && ls != g_app.remote_base) *ls = '\0'; else if (ls == g_app.remote_base) *(ls+1) = '\0';
         } else {
             if (strlen(g_app.local_base) <= 3 && g_app.local_base[1] == ':') strcpy(g_app.local_base, ""); 
-            else { 
-                char *ls = strrchr(g_app.local_base, '\\'); 
-                if (ls) { if (ls == g_app.local_base + 2) *(ls + 1) = '\0'; else *ls = '\0'; } 
+            else { char *ls = strrchr(g_app.local_base, '\\'); if (ls) { if (ls == g_app.local_base + 2) *(ls + 1) = '\0'; else *ls = '\0'; } }
+        }
+    }
+    
+    if (action == ID_BTN_COPY || action == ID_BTN_MOVE || action == ID_BTN_DELETE) { list_local(); list_remote(); }
+}
+
+static int connect_server(ConnectionProfile *p) {
+    disconnect_all(); WSADATA wd; WSAStartup(MAKEWORD(2,2), &wd);
+    struct addrinfo hints={0}, *res; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+    char *conn_port = (p->port[0] != '\0') ? p->port : "445";
+    if (getaddrinfo(p->server, conn_port, &hints, &res) != 0) { add_log("Host lookup failed."); return 0; }
+    
+    g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (!connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) { 
+        add_log("Socket conn failed (50ms timeout)."); closesocket(g_app.sconn); g_app.sconn = 0; freeaddrinfo(res); return 0; 
+    }
+    
+    char full_share[MAX_SMB_PATH]; strcpy(full_share, p->share); normalize_path(full_share, 0); 
+    char share_root[128] = ""; char sub_dir[MAX_SMB_PATH] = "\\";
+    char *first_slash = strchr(full_share, '\\'); if (first_slash == full_share) first_slash = strchr(full_share + 1, '\\');
+    if (first_slash) { int root_len = first_slash - full_share; if (full_share[0] == '\\') { root_len = first_slash - (full_share + 1); strncpy(share_root, full_share + 1, root_len); } else strncpy(share_root, full_share, root_len); share_root[root_len] = '\0'; strcpy(sub_dir, first_slash); } else { if (full_share[0] == '\\') strcpy(share_root, full_share + 1); else strcpy(share_root, full_share); }
+
+    int try_smb2 = (p->proto_pref == PROTO_SMB2 || p->proto_pref == PROTO_AUTO);
+    int try_smb1 = (p->proto_pref == PROTO_SMB1 || p->proto_pref == PROTO_AUTO);
+    int smb1_connected = 0;
+    
+    /* SMB1 priority */
+    if (try_smb1) {
+        add_log("Connecting via SMB1...");
+        g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1;
+        if (smb_negotiate()) {
+            int auth_success = smb_session(p->user, p->pass);
+            if (!auth_success && (strlen(p->user) > 0 || strlen(p->pass) > 0)) {
+                closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+                if (connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) { 
+                    g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1; 
+                    if (smb_negotiate()) auth_success = smb_session("", ""); 
+                }
+            }
+            if (auth_success) {
+                if (smb_tree_connect(p->server, share_root)) { 
+                    g_app.conn_type = CONN_SMB; g_app.current_proto = PROTO_SMB1; strcpy(g_app.remote_base, sub_dir); 
+                    list_remote(); add_log("Connected via SMB1"); freeaddrinfo(res); return 1; 
+                } 
+            }
+        } 
+    }
+    
+    /* Fallback to SMB2 */
+    if (!smb1_connected && try_smb2) {
+        closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) {
+            add_log("Connecting via SMB2...");
+            if (smb2_negotiate()) {
+                if (smb2_session_setup(p->user, p->pass)) {
+                    if (smb2_tree_connect(p->server, share_root)) {
+                        g_app.conn_type = CONN_SMB; g_app.current_proto = PROTO_SMB2; strcpy(g_app.remote_base, sub_dir); 
+                        list_remote(); add_log("Connected via SMB2"); freeaddrinfo(res); return 1;
+                    }
+                } 
             }
         }
     }
     
-    if (action == ID_BTN_COPY || action == ID_BTN_MOVE || action == ID_BTN_DELETE) { 
-        list_local(); list_remote(); 
-    }
+    freeaddrinfo(res); return 0;
+}
+
+static int connect_ftp(ConnectionProfile *p) {
+    disconnect_all(); g_app.hInternet = InternetOpenA("DualPaneClient", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0); if (!g_app.hInternet) return 0;
+    
+    DWORD timeout = 50;
+    InternetSetOptionA(g_app.hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    InternetSetOptionA(g_app.hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    InternetSetOptionA(g_app.hInternet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+    
+    const char *ftp_user = (p->user[0] != '\0') ? p->user : NULL; const char *ftp_pass = (p->pass[0] != '\0') ? p->pass : NULL;
+    INTERNET_PORT ftp_port = INTERNET_DEFAULT_FTP_PORT; if (p->port[0] != '\0') { int parsed = atoi(p->port); if (parsed > 0) ftp_port = (INTERNET_PORT)parsed; }
+    g_app.hFtpSession = InternetConnectA(g_app.hInternet, p->server, ftp_port, ftp_user, ftp_pass, INTERNET_SERVICE_FTP, INTERNET_FLAG_PASSIVE, 0);
+    if (!g_app.hFtpSession) { InternetCloseHandle(g_app.hInternet); g_app.hInternet = NULL; return 0; }
+    g_app.conn_type = CONN_FTP; normalize_path(p->share, 1);
+    char ftp_path[MAX_SMB_PATH_LEN] = "/"; if (p->share[0] != '\0') snprintf(ftp_path, sizeof(ftp_path), "/%s", p->share); normalize_path(ftp_path, 1);
+    strncpy(g_app.remote_base, ftp_path, MAX_SMB_PATH_LEN-1);
+    if (strcmp(g_app.remote_base, "/") != 0) { if (!FtpSetCurrentDirectoryA(g_app.hFtpSession, g_app.remote_base)) { strcpy(g_app.remote_base, "/"); FtpSetCurrentDirectoryA(g_app.hFtpSession, "/"); } }
+    list_remote(); return 1;
 }
 
 /* ==========================================================================
-   WINDOW DIALOG PROCEDURES
+   NATIVE UI SUBCLASS & DIALOG PROCEDURES
    ========================================================================== */
+BOOL CALLBACK SetFontEnumProc(HWND hwnd, LPARAM lParam) {
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)lParam, TRUE);
+    return TRUE;
+}
+
+static LRESULT CALLBACK ListSubProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_GETDLGCODE) {
+        LRESULT res = CallWindowProc(OldListProc, hwnd, msg, wp, lp);
+        if (lp) { MSG *pMsg = (MSG *)lp; if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_RETURN) return res | DLGC_WANTMESSAGE; }
+        return res;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        HWND hParent = GetParent(hwnd); int id = GetDlgCtrlID(hwnd);
+        SendMessageA(hParent, WM_COMMAND, MAKEWPARAM(id, LBN_DBLCLK), (LPARAM)hwnd);
+        return 0;
+    }
+
+    static int is_dragging = 0; static POINT drag_start;
+    if (msg == WM_LBUTTONDOWN) { drag_start.x = (short)LOWORD(lp); drag_start.y = (short)HIWORD(lp); is_dragging = 0; } 
+    else if (msg == WM_MOUSEMOVE && (wp & MK_LBUTTON)) {
+        int dx = (short)LOWORD(lp) - drag_start.x; int dy = (short)HIWORD(lp) - drag_start.y;
+        if (!is_dragging && (abs(dx) > 5 || abs(dy) > 5)) { 
+            int idx = SendMessageA(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(drag_start.x, drag_start.y));
+            if (HIWORD(idx) == 0) { if (SendMessageA(hwnd, LB_GETSEL, LOWORD(idx), 0) > 0) { is_dragging = 1; SetCapture(hwnd); SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return 0; } }
+        }
+        if (is_dragging) { SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return 0; }
+    } 
+    else if (msg == WM_LBUTTONUP) {
+        if (is_dragging) {
+            is_dragging = 0; ReleaseCapture(); POINT pt; GetCursorPos(&pt); HWND hTarget = WindowFromPoint(pt);
+            HWND hOther = (hwnd == g_app.hLocalList) ? g_app.hRemoteList : g_app.hLocalList;
+            if (hTarget == hOther) { g_app.active_pane = (hwnd == g_app.hRemoteList) ? PANE_REMOTE : PANE_LOCAL; do_action((GetKeyState(VK_SHIFT) & 0x8000) ? ID_BTN_MOVE : ID_BTN_COPY); }
+            return 0;
+        }
+    }
+    return CallWindowProc(OldListProc, hwnd, msg, wp, lp);
+}
+
 static LRESULT CALLBACK CreateDirWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static HWND hEdit;
     switch (msg) {
         case WM_CREATE: {
             CreateWindowA("STATIC", "Folder Name:", WS_CHILD|WS_VISIBLE, 10, 10, 90, 20, hwnd, NULL, g_hInst, NULL);
             hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 105, 10, 165, 20, hwnd, (HMENU)IDE_MKDIR_NAME, g_hInst, NULL);
-            
             CreateWindowA("BUTTON", "OK", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON, 100, 40, 80, 25, hwnd, (HMENU)IDB_MKDIR_OK, g_hInst, NULL);
             CreateWindowA("BUTTON", "Cancel", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 190, 40, 80, 25, hwnd, (HMENU)IDB_CANCEL, g_hInst, NULL);
-            
-            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas");
-            EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF);
-            SetFocus(hEdit);
-            return 0;
+            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas"); EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF); SetFocus(hEdit); return 0;
         }
-        case DM_GETDEFID:
-            return MAKELRESULT(IDB_MKDIR_OK, DC_HASDEFID);
+        case DM_GETDEFID: return MAKELRESULT(IDB_MKDIR_OK, DC_HASDEFID);
         case WM_COMMAND: {
-            /* Map the native Enter key (IDOK) to the OK button */
             if (LOWORD(wp) == IDB_MKDIR_OK || LOWORD(wp) == IDOK) {
-                char dir_name[MAX_SMB_PATH];
-                GetWindowTextA(hEdit, dir_name, sizeof(dir_name));
-                trim_str(dir_name);
-
+                char dir_name[MAX_SMB_PATH]; GetWindowTextA(hEdit, dir_name, sizeof(dir_name)); trim_str(dir_name);
                 if (strlen(dir_name) > 0) {
                     int is_rem = (g_app.active_pane == PANE_REMOTE);
                     if (is_rem) {
-                        if (g_app.conn_type == CONN_FTP) {
-                            ftp_mkdir_ex(g_app.remote_base, dir_name);
-                        } else if (g_app.current_proto == PROTO_SMB1) {
-                            smb_mkdir_ex(g_app.remote_base, dir_name);
-                        } else if (g_app.current_proto == PROTO_SMB2) {
-                            char rel_target[MAX_SMB_PATH];
-                            format_folder_path(rel_target, sizeof(rel_target), g_app.remote_base, dir_name, 0);
-                            smb2_mkdir(rel_target);
-                        }
+                        if (g_app.conn_type == CONN_FTP) { ftp_mkdir_ex(g_app.remote_base, dir_name); } 
+                        else if (g_app.current_proto == PROTO_SMB1) { smb_mkdir_ex(g_app.remote_base, dir_name); } 
+                        else if (g_app.current_proto == PROTO_SMB2) { char rel_target[MAX_SMB_PATH]; format_folder_path(rel_target, sizeof(rel_target), g_app.remote_base, dir_name, 0); smb2_mkdir(rel_target); }
                         list_remote();
                     } else {
-                        char target_path[MAX_SMB_PATH];
-                        format_folder_path(target_path, sizeof(target_path), g_app.local_base, dir_name, 0);
-                        CreateDirectoryA(target_path, NULL);
-                        list_local();
+                        char target_path[MAX_SMB_PATH]; format_folder_path(target_path, sizeof(target_path), g_app.local_base, dir_name, 0);
+                        CreateDirectoryA(target_path, NULL); list_local();
                     }
                 }
                 SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            } 
-            /* Map the native Escape key (IDCANCEL) to the Cancel button */
-            else if (LOWORD(wp) == IDB_CANCEL || LOWORD(wp) == IDCANCEL) {
-                SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            }
+            } else if (LOWORD(wp) == IDB_CANCEL || LOWORD(wp) == IDCANCEL) { SendMessageA(hwnd, WM_CLOSE, 0, 0); }
             break;
         }
-        case WM_CLOSE:
-            EnableWindow(GetWindow(hwnd, GW_OWNER), TRUE);
-            DestroyWindow(hwnd);
-            return 0;
+        case WM_CLOSE: EnableWindow(GetWindow(hwnd, GW_OWNER), TRUE); DestroyWindow(hwnd); return 0;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -1899,61 +1783,29 @@ static LRESULT CALLBACK RenameWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_CREATE: {
             CreateWindowA("STATIC", "New Name:", WS_CHILD|WS_VISIBLE, 10, 10, 80, 20, hwnd, NULL, g_hInst, NULL);
             hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", g_ren_item, WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_AUTOHSCROLL, 100, 10, 170, 20, hwnd, (HMENU)IDE_RENAME_NEW, g_hInst, NULL);
-            
             CreateWindowA("BUTTON", "OK", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON, 100, 40, 80, 25, hwnd, (HMENU)IDB_RENAME_OK, g_hInst, NULL);
             CreateWindowA("BUTTON", "Cancel", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 190, 40, 80, 25, hwnd, (HMENU)IDB_CANCEL, g_hInst, NULL);
-            
-            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas"); 
-            EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF); 
-            SetFocus(hEdit); 
-            return 0;
+            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas"); EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF); SetFocus(hEdit); return 0;
         }
-        case DM_GETDEFID:
-            return MAKELRESULT(IDB_RENAME_OK, DC_HASDEFID);
+        case DM_GETDEFID: return MAKELRESULT(IDB_RENAME_OK, DC_HASDEFID);
         case WM_COMMAND: {
             if (LOWORD(wp) == IDB_RENAME_OK || LOWORD(wp) == IDOK) {
-                char new_name[MAX_SMB_PATH], src_full[MAX_SMB_PATH], dst_full[MAX_SMB_PATH];
-                GetWindowTextA(hEdit, new_name, MAX_SMB_PATH);
-                int is_rem = (g_app.active_pane == PANE_REMOTE); 
-                int is_ftp = (g_app.conn_type == CONN_FTP); 
-                char sep = (is_rem && is_ftp) ? '/' : '\\';
-                
-                if (g_ren_base[strlen(g_ren_base)-1] == sep) { 
-                    snprintf(src_full, sizeof(src_full), "%s%s", g_ren_base, g_ren_item); 
-                    snprintf(dst_full, sizeof(dst_full), "%s%s", g_ren_base, new_name); 
-                } else { 
-                    snprintf(src_full, sizeof(src_full), "%s%c%s", g_ren_base, sep, g_ren_item); 
-                    snprintf(dst_full, sizeof(dst_full), "%s%c%s", g_ren_base, sep, new_name); 
-                }
-                
-                normalize_path(src_full, is_rem && is_ftp); 
-                normalize_path(dst_full, is_rem && is_ftp);
+                char new_name[MAX_SMB_PATH], src_full[MAX_SMB_PATH], dst_full[MAX_SMB_PATH]; GetWindowTextA(hEdit, new_name, MAX_SMB_PATH);
+                int is_rem = (g_app.active_pane == PANE_REMOTE); int is_ftp = (g_app.conn_type == CONN_FTP); char sep = (is_rem && is_ftp) ? '/' : '\\';
+                if (g_ren_base[strlen(g_ren_base)-1] == sep) { snprintf(src_full, sizeof(src_full), "%s%s", g_ren_base, g_ren_item); snprintf(dst_full, sizeof(dst_full), "%s%s", g_ren_base, new_name); } 
+                else { snprintf(src_full, sizeof(src_full), "%s%c%s", g_ren_base, sep, g_ren_item); snprintf(dst_full, sizeof(dst_full), "%s%c%s", g_ren_base, sep, new_name); }
+                normalize_path(src_full, is_rem && is_ftp); normalize_path(dst_full, is_rem && is_ftp);
                 
                 int current_renamed = 0;
-                if (is_rem) {
-                    char norm_rem[MAX_SMB_PATH]; strcpy(norm_rem, g_app.remote_base); normalize_path(norm_rem, is_ftp);
-                    if (_stricmp(src_full, norm_rem) == 0) current_renamed = 1;
-                } else {
-                    char norm_loc[MAX_SMB_PATH]; strcpy(norm_loc, g_app.local_base); normalize_path(norm_loc, 0);
-                    if (_stricmp(src_full, norm_loc) == 0) current_renamed = 1;
-                }
+                if (is_rem) { char norm_rem[MAX_SMB_PATH]; strcpy(norm_rem, g_app.remote_base); normalize_path(norm_rem, is_ftp); if (_stricmp(src_full, norm_rem) == 0) current_renamed = 1; } 
+                else { char norm_loc[MAX_SMB_PATH]; strcpy(norm_loc, g_app.local_base); normalize_path(norm_loc, 0); if (_stricmp(src_full, norm_loc) == 0) current_renamed = 1; }
 
                 if (is_rem) { 
-                    if (g_app.current_proto == PROTO_SMB1) smb_rename(src_full, dst_full); 
-                    else if (g_app.current_proto == PROTO_SMB2) smb2_rename(src_full, dst_full); 
-                    else if (g_app.conn_type == CONN_FTP) FtpRenameFileA(g_app.hFtpSession, src_full, dst_full); 
-                    
-                    if (current_renamed) strcpy(g_app.remote_base, dst_full);
-                    list_remote(); 
-                } else { 
-                    MoveFileA(src_full, dst_full); 
-                    if (current_renamed) strcpy(g_app.local_base, dst_full);
-                    list_local(); 
-                }
+                    if (g_app.current_proto == PROTO_SMB1) smb_rename(src_full, dst_full); else if (g_app.current_proto == PROTO_SMB2) smb2_rename(src_full, dst_full); else if (g_app.conn_type == CONN_FTP) FtpRenameFileA(g_app.hFtpSession, src_full, dst_full); 
+                    if (current_renamed) strcpy(g_app.remote_base, dst_full); list_remote(); 
+                } else { MoveFileA(src_full, dst_full); if (current_renamed) strcpy(g_app.local_base, dst_full); list_local(); }
                 SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            } else if (LOWORD(wp) == IDB_CANCEL || LOWORD(wp) == IDCANCEL) {
-                SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            }
+            } else if (LOWORD(wp) == IDB_CANCEL || LOWORD(wp) == IDCANCEL) { SendMessageA(hwnd, WM_CLOSE, 0, 0); }
             break;
         }
         case WM_CLOSE: EnableWindow(GetWindow(hwnd, GW_OWNER), TRUE); DestroyWindow(hwnd); return 0;
@@ -1961,90 +1813,19 @@ static LRESULT CALLBACK RenameWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-/* ==========================================================================
-   NATIVE DRAG AND DROP
-   ========================================================================== */
-static LRESULT CALLBACK ListSubProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    /* Tell IsDialogMessage that we want to handle the Enter key ourselves when focused */
-    if (msg == WM_GETDLGCODE) {
-        LRESULT res = CallWindowProc(OldListProc, hwnd, msg, wp, lp);
-        if (lp) {
-            MSG *pMsg = (MSG *)lp;
-            if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_RETURN) {
-                return res | DLGC_WANTMESSAGE;
-            }
-        }
-        return res;
-    }
-    
-    /* Pressing Enter on the ListBox triggers the same action as a double click */
-    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
-        HWND hParent = GetParent(hwnd);
-        int id = GetDlgCtrlID(hwnd);
-        SendMessageA(hParent, WM_COMMAND, MAKEWPARAM(id, LBN_DBLCLK), (LPARAM)hwnd);
-        return 0;
-    }
-
-    static int is_dragging = 0; 
-    static POINT drag_start;
-    
-    if (msg == WM_LBUTTONDOWN) { 
-        drag_start.x = (short)LOWORD(lp); drag_start.y = (short)HIWORD(lp); is_dragging = 0;
-    } 
-    else if (msg == WM_MOUSEMOVE && (wp & MK_LBUTTON)) {
-        int dx = (short)LOWORD(lp) - drag_start.x; int dy = (short)HIWORD(lp) - drag_start.y;
-        if (!is_dragging && (abs(dx) > 5 || abs(dy) > 5)) { 
-            int idx = SendMessageA(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(drag_start.x, drag_start.y));
-            if (HIWORD(idx) == 0) {
-                if (SendMessageA(hwnd, LB_GETSEL, LOWORD(idx), 0) > 0) {
-                    is_dragging = 1; SetCapture(hwnd); SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return 0; 
-                }
-            }
-        }
-        if (is_dragging) { SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return 0; }
-    } 
-    else if (msg == WM_LBUTTONUP) {
-        if (is_dragging) {
-            is_dragging = 0; ReleaseCapture(); 
-            POINT pt; GetCursorPos(&pt); HWND hTarget = WindowFromPoint(pt);
-            HWND hOther = (hwnd == g_app.hLocalList) ? g_app.hRemoteList : g_app.hLocalList;
-            if (hTarget == hOther) { 
-                g_app.active_pane = (hwnd == g_app.hRemoteList) ? PANE_REMOTE : PANE_LOCAL; 
-                do_action((GetKeyState(VK_SHIFT) & 0x8000) ? ID_BTN_MOVE : ID_BTN_COPY); 
-            }
-            return 0;
-        }
-    }
-    return CallWindowProc(OldListProc, hwnd, msg, wp, lp);
-}
-
 static LRESULT CALLBACK EditConnWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     static HWND hN, hS, hPrt, hSh, hU, hP, hChkFTP, hChkSMB2;
     switch (msg) {
           case WM_CREATE: {
             int y = 10;
-            CreateWindowA("STATIC", "Name:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hN = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
-            
-            CreateWindowA("STATIC", "Server:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hS = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
-            
-            CreateWindowA("STATIC", "Port (Blank=Def):", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hPrt = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
-            
-            CreateWindowA("STATIC", "Share/Path:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hSh = CreateWindowExA(WS_EX_CLIENTEDGE, "COMBOBOX", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWN|CBS_AUTOHSCROLL, 110, y, 140, 150, hwnd, NULL, g_hInst, NULL); 
-            CreateWindowA("BUTTON", "Test", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 255, y, 55, 22, hwnd, (HMENU)IDB_TEST, g_hInst, NULL); y+=25;
-            
-            CreateWindowA("STATIC", "User:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hU = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
-            
-            CreateWindowA("STATIC", "Pass:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); 
-            hP = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_PASSWORD, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
-            
+            CreateWindowA("STATIC", "Name:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hN = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
+            CreateWindowA("STATIC", "Server:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hS = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
+            CreateWindowA("STATIC", "Port (Blank=Def):", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hPrt = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
+            CreateWindowA("STATIC", "Share/Path:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hSh = CreateWindowExA(WS_EX_CLIENTEDGE, "COMBOBOX", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWN|CBS_AUTOHSCROLL, 110, y, 140, 150, hwnd, NULL, g_hInst, NULL); CreateWindowA("BUTTON", "Test", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 255, y, 55, 22, hwnd, (HMENU)IDB_TEST, g_hInst, NULL); y+=25;
+            CreateWindowA("STATIC", "User:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hU = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
+            CreateWindowA("STATIC", "Pass:", WS_CHILD|WS_VISIBLE, 10, y, 90, 20, hwnd, NULL, g_hInst, NULL); hP = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD|WS_VISIBLE|WS_TABSTOP|ES_PASSWORD, 110, y, 200, 20, hwnd, NULL, g_hInst, NULL); y+=25;
             hChkFTP = CreateWindowA("BUTTON", "FTP Protocol Mode", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX|WS_TABSTOP, 110, y, 200, 20, hwnd, (HMENU)IDC_CHK_FTP, g_hInst, NULL); y+=25;
             hChkSMB2 = CreateWindowA("BUTTON", "Force SMB2 Only", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX|WS_TABSTOP, 110, y, 200, 20, hwnd, (HMENU)IDC_PROTO_SMB2, g_hInst, NULL); y+=25;
-            
             CreateWindowA("BUTTON", "Add", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 10, y, 70, 25, hwnd, (HMENU)IDB_ADD, g_hInst, NULL); 
             CreateWindowA("BUTTON", "Save", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON, 87, y, 70, 25, hwnd, (HMENU)IDB_SAVE, g_hInst, NULL); 
             CreateWindowA("BUTTON", "Delete", WS_CHILD|WS_VISIBLE|WS_TABSTOP, 164, y, 70, 25, hwnd, (HMENU)IDB_DELETE, g_hInst, NULL); 
@@ -2052,25 +1833,15 @@ static LRESULT CALLBACK EditConnWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             
             ConnectionProfile *p = &g_app.connections[g_app.selected_conn_idx];
             SetWindowTextA(hN, p->name); SetWindowTextA(hS, p->server); SetWindowTextA(hPrt, p->port); SetWindowTextA(hU, p->user); SetWindowTextA(hP, p->pass); 
-            SendMessageA(hChkFTP, BM_SETCHECK, p->is_ftp ? BST_CHECKED : BST_UNCHECKED, 0); 
-            SendMessageA(hChkSMB2, BM_SETCHECK, p->proto_pref == PROTO_SMB2 ? BST_CHECKED : BST_UNCHECKED, 0);
-            
-            char hist_copy[512]; strcpy(hist_copy, p->shares_hist); 
-            char *token = strtok(hist_copy, "|"); 
-            while (token) { SendMessageA(hSh, CB_ADDSTRING, 0, (LPARAM)token); token = strtok(NULL, "|"); } 
-            SetWindowTextA(hSh, p->share);
-            
-            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas"); 
-            EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF); 
-            return 0;
+            SendMessageA(hChkFTP, BM_SETCHECK, p->is_ftp ? BST_CHECKED : BST_UNCHECKED, 0); SendMessageA(hChkSMB2, BM_SETCHECK, p->proto_pref == PROTO_SMB2 ? BST_CHECKED : BST_UNCHECKED, 0);
+            char hist_copy[512]; strcpy(hist_copy, p->shares_hist); char *token = strtok(hist_copy, "|"); while (token) { SendMessageA(hSh, CB_ADDSTRING, 0, (LPARAM)token); token = strtok(NULL, "|"); } SetWindowTextA(hSh, p->share);
+            HFONT hF = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, 0, 0, 0, 0, "Consolas"); EnumChildWindows(hwnd, SetFontEnumProc, (LPARAM)hF); return 0;
         }
-        case DM_GETDEFID:
-            return MAKELRESULT(IDB_SAVE, DC_HASDEFID);
+        case DM_GETDEFID: return MAKELRESULT(IDB_SAVE, DC_HASDEFID);
         case WM_COMMAND: {
             int id = LOWORD(wp);
             if (id == IDB_TEST) {
-                char srv[128], prt[16], usr[64], pwd[64]; 
-                GetWindowTextA(hS, srv, sizeof(srv)); GetWindowTextA(hPrt, prt, sizeof(prt)); GetWindowTextA(hU, usr, sizeof(usr)); GetWindowTextA(hP, pwd, sizeof(pwd));
+                char srv[128], prt[16], usr[64], pwd[64]; GetWindowTextA(hS, srv, sizeof(srv)); GetWindowTextA(hPrt, prt, sizeof(prt)); GetWindowTextA(hU, usr, sizeof(usr)); GetWindowTextA(hP, pwd, sizeof(pwd));
                 add_log("Testing connection and enumerating shares for %s...", srv);
                 WSADATA wd; WSAStartup(MAKEWORD(2,2), &wd);
                 struct addrinfo hints={0}, *res; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
@@ -2078,51 +1849,37 @@ static LRESULT CALLBACK EditConnWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 
                 if (getaddrinfo(srv, cport, &hints, &res) == 0) {
                     g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                    if (connect(g_app.sconn, res->ai_addr, res->ai_addrlen) == 0) {
+                    if (connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) {
                         strcpy(g_app.pending_server, srv);
-                        g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1;
-                        g_app.smb2_message_id = 0; g_app.smb2_session_id = 0; g_app.smb2_tree_id = 0;
+                        g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1; g_app.smb2_message_id = 0; g_app.smb2_session_id = 0; g_app.smb2_tree_id = 0;
                         int smb2_connected = 0; int smb1_connected = 0;
                         int proto_pref = (SendMessageA(hChkSMB2, BM_GETCHECK, 0, 0) == BST_CHECKED) ? PROTO_SMB2 : PROTO_AUTO;
                         
-                        if (proto_pref == PROTO_SMB2 || proto_pref == PROTO_AUTO) {
-                            if (smb2_negotiate()) {
-                                if (smb2_session_setup(usr, pwd)) { smb2_connected = 1; }
-                            }
-                            if (!smb2_connected && proto_pref == PROTO_AUTO) {
-                                closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                                connect(g_app.sconn, res->ai_addr, res->ai_addrlen);
-                            }
-                        }
-                        if (!smb2_connected && (proto_pref == PROTO_SMB1 || proto_pref == PROTO_AUTO)) {
+                        if (proto_pref == PROTO_SMB1 || proto_pref == PROTO_AUTO) {
                             g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1;
                             if (smb_negotiate()) {
                                 int auth_success = smb_session(usr, pwd);
                                 if (!auth_success && (strlen(usr) > 0 || strlen(pwd) > 0)) {
                                     closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                                    if (connect(g_app.sconn, res->ai_addr, res->ai_addrlen) == 0) {
-                                        g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1;
-                                        if (smb_negotiate()) { auth_success = smb_session("", ""); }
-                                    }
+                                    if (connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) { g_app.uid = 0; g_app.tid = 0; g_app.mid_counter = 1; if (smb_negotiate()) { auth_success = smb_session("", ""); } }
                                 }
                                 if (auth_success) smb1_connected = 1;
                             }
                         }
+                        if (!smb1_connected && (proto_pref == PROTO_SMB2 || proto_pref == PROTO_AUTO)) {
+                            closesocket(g_app.sconn); g_app.sconn = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+                            if (connect_with_timeout(g_app.sconn, res->ai_addr, res->ai_addrlen)) { if (smb2_negotiate()) { if (smb2_session_setup(usr, pwd)) { smb2_connected = 1; } } }
+                        }
                         if (smb2_connected || smb1_connected) {
-                            char shares[MAX_SHARES][64]; 
-                            int count = enumerate_shares(shares, MAX_SHARES, smb2_connected);
+                            char shares[MAX_SHARES][64]; int count = enumerate_shares(shares, MAX_SHARES, smb2_connected);
                             if (count > 0) {
                                 SendMessageA(hSh, CB_RESETCONTENT, 0, 0); char new_hist[512] = {0};
-                                for(int i = 0; i < count; i++) {
-                                    SendMessageA(hSh, CB_ADDSTRING, 0, (LPARAM)shares[i]);
-                                    if (i > 0) strcat(new_hist, "|"); strcat(new_hist, shares[i]);
-                                }
-                                SendMessageA(hSh, CB_SETCURSEL, 0, 0); strcpy(g_app.connections[g_app.selected_conn_idx].shares_hist, new_hist);
-                                add_log("Found %d shares.", count);
+                                for(int i = 0; i < count; i++) { SendMessageA(hSh, CB_ADDSTRING, 0, (LPARAM)shares[i]); if (i > 0) strcat(new_hist, "|"); strcat(new_hist, shares[i]); }
+                                SendMessageA(hSh, CB_SETCURSEL, 0, 0); strcpy(g_app.connections[g_app.selected_conn_idx].shares_hist, new_hist); add_log("Found %d shares.", count);
                             } else { add_log("Connected but no readable shares found."); }
                         } else { add_log("Session setup (authentication) failed."); }
                         if (g_app.sconn) { closesocket(g_app.sconn); g_app.sconn = 0; }
-                    } else add_log("Socket connection failed.");
+                    } else add_log("Socket connection failed (50ms timeout).");
                     freeaddrinfo(res);
                 } else add_log("Host lookup failed.");
             }
@@ -2147,9 +1904,7 @@ static LRESULT CALLBACK EditConnWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                     SetWindowTextA(hN, p->name); SetWindowTextA(hS, p->server); SetWindowTextA(hPrt, p->port); SetWindowTextA(hSh, p->share); SetWindowTextA(hU, p->user); SetWindowTextA(hP, p->pass); SendMessageA(hChkFTP, BM_SETCHECK, p->is_ftp ? BST_CHECKED : BST_UNCHECKED, 0); SendMessageA(hChkSMB2, BM_SETCHECK, p->proto_pref == PROTO_SMB2 ? BST_CHECKED : BST_UNCHECKED, 0);
                     SendMessageA(hSh, CB_RESETCONTENT, 0, 0); char hist_copy[512]; strcpy(hist_copy, p->shares_hist); char *token = strtok(hist_copy, "|"); while (token) { SendMessageA(hSh, CB_ADDSTRING, 0, (LPARAM)token); token = strtok(NULL, "|"); } SetWindowTextA(hSh, p->share); save_config(GetWindow(hwnd, GW_OWNER)); add_log("Connection profile deleted.");
                 } else add_log("Cannot delete the last remaining connection profile.");
-            } else if (id == IDB_CANCEL || id == IDCANCEL) {
-                SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            }
+            } else if (id == IDB_CANCEL || id == IDCANCEL) { SendMessageA(hwnd, WM_CLOSE, 0, 0); }
             break;
         }
         case WM_CLOSE: EnableWindow(GetWindow(hwnd, GW_OWNER), TRUE); DestroyWindow(hwnd); return 0;
@@ -2165,9 +1920,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int x = 10;
             g_app.hComboConn = CreateWindowExA(0, "COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_TABSTOP, x, 10, 180, 200, hwnd, (HMENU)ID_COMBO_CONN, g_hInst, NULL); x += 185;
             g_app.hBtnEdit = CreateWindowExA(0, "BUTTON", "Edit", WS_CHILD|WS_VISIBLE|WS_TABSTOP, x, 10, 45, 25, hwnd, (HMENU)ID_BTN_EDIT_CONN, g_hInst, NULL); x += 50;
-            
             g_app.hBtnConnect = CreateWindowExA(0, "BUTTON", "Connect", WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON, x, 10, 65, 25, hwnd, (HMENU)ID_BTN_CONNECT, g_hInst, NULL); x += 70;
-            
             g_app.hBtnCopy = CreateWindowExA(0, "BUTTON", "Copy", WS_CHILD|WS_VISIBLE|WS_TABSTOP, x, 10, 55, 25, hwnd, (HMENU)ID_BTN_COPY, g_hInst, NULL); x += 60;
             g_app.hBtnMove = CreateWindowExA(0, "BUTTON", "Move", WS_CHILD|WS_VISIBLE|WS_TABSTOP, x, 10, 55, 25, hwnd, (HMENU)ID_BTN_MOVE, g_hInst, NULL); x += 60;
             g_app.hBtnRename = CreateWindowExA(0, "BUTTON", "Rename", WS_CHILD|WS_VISIBLE|WS_TABSTOP, x, 10, 60, 25, hwnd, (HMENU)ID_BTN_RENAME, g_hInst, NULL); x += 65;
@@ -2188,8 +1941,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             list_local(); g_app.active_pane = PANE_LOCAL; update_remote_list();
             return 0;
         }
-        case DM_GETDEFID:
-            return MAKELRESULT(ID_BTN_CONNECT, DC_HASDEFID);
+        case DM_GETDEFID: return MAKELRESULT(ID_BTN_CONNECT, DC_HASDEFID);
         case WM_TIMER: { if (wp == TIMER_PROGRESS_HIDE) { KillTimer(hwnd, TIMER_PROGRESS_HIDE); ShowWindow(g_app.hProgress, SW_HIDE); } return 0; }
         case WM_SIZE: {
             int w = LOWORD(lp), h = HIWORD(lp); int progress_w = 180;
@@ -2249,7 +2001,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdSh
     WNDCLASSEXA wcr={sizeof(WNDCLASSEXA),0,RenameWndProc,0,0,hInst,NULL,LoadCursor(NULL,IDC_ARROW),(HBRUSH)(COLOR_WINDOW+1),NULL,"RenameClass",NULL}; RegisterClassExA(&wcr);
     WNDCLASSEXA wcm={sizeof(WNDCLASSEXA),0,CreateDirWndProc,0,0,hInst,NULL,LoadCursor(NULL,IDC_ARROW),(HBRUSH)(COLOR_WINDOW+1),NULL,"CreateDirClass",NULL}; RegisterClassExA(&wcm);
     
-    /* WS_EX_CONTROLPARENT enables internal Tab navigation for IsDialogMessage */
     HWND hwnd = CreateWindowExA(WS_EX_CONTROLPARENT, "MainClass", "Dual Pane SMB1/SMB2/FTP Client", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, NULL, NULL, hInst, NULL);
     ShowWindow(hwnd, nCmdShow); UpdateWindow(hwnd);
     
@@ -2258,8 +2009,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nCmdSh
         if (bRet == -1) break; 
         HWND hActive = GetActiveWindow();
         if (hActive && IsDialogMessage(hActive, &msg)) continue;
-        TranslateMessage(&msg); 
-        DispatchMessage(&msg); 
+        TranslateMessage(&msg); DispatchMessage(&msg); 
     }
     ExitProcess((UINT)msg.wParam); return (int)msg.wParam;
 }
