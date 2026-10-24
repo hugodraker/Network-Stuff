@@ -1208,24 +1208,38 @@ static void CmdSearch(ClientSession* session, const char* tag, ASTNode* args, BO
     char* csv_data;
     BOOL filter_undeleted = FALSE;
     char target_msg_id[256] = {0};
+    char target_text[256] = {0};
     
     ASTNode* arg = args;
     while(arg) {
         char upper_val[128];
         int i = 0;
-        while (arg->value[i] && i < 127) { upper_val[i] = toupper((unsigned char)arg->value[i]); i++; }
+        while (arg->value[i] && i < 127) { upper_val[i] = (char)toupper((unsigned char)arg->value[i]); i++; }
         upper_val[i] = '\0';
         
-        if (strstr(upper_val, "UNDELETED")) filter_undeleted = TRUE;
-        
-        if (strstr(upper_val, "HEADER") && arg->next && arg->next->next) {
+        if (strstr(upper_val, "UNDELETED")) {
+            filter_undeleted = TRUE;
+        }
+        else if (strstr(upper_val, "HEADER") && arg->next && arg->next->next) {
             char header_name[128];
             i = 0;
-            while (arg->next->value[i] && i < 127) { header_name[i] = toupper((unsigned char)arg->next->value[i]); i++; }
+            while (arg->next->value[i] && i < 127) { header_name[i] = (char)toupper((unsigned char)arg->next->value[i]); i++; }
             header_name[i] = '\0';
             if (strstr(header_name, "MESSAGE-ID")) {
                 strncpy(target_msg_id, arg->next->next->value, 255);
                 target_msg_id[255] = '\0';
+            }
+            arg = arg->next->next;
+        }
+        else if ((strstr(upper_val, "TEXT") || strstr(upper_val, "BODY") || strstr(upper_val, "SUBJECT") || strstr(upper_val, "FROM") || strstr(upper_val, "TO")) && arg->next) {
+            strncpy(target_text, arg->next->value, 255);
+            target_text[255] = '\0';
+            arg = arg->next;
+        }
+        else if (arg->type == NODE_STRING || arg->type == NODE_ATOM) {
+            if (target_text[0] == '\0' && strcmp(upper_val, "ALL") != 0 && strcmp(upper_val, "SEARCH") != 0) {
+                strncpy(target_text, arg->value, 255);
+                target_text[255] = '\0';
             }
         }
         arg = arg->next;
@@ -1245,19 +1259,27 @@ static void CmdSearch(ClientSession* session, const char* tag, ASTNode* args, BO
                 char flags[256], filename[MAX_PATH];
                 if (ParseCSVLine(p, &seq_num, &uid, flags, filename)) {
                     if (!filter_undeleted || !strstr(flags, "\\Deleted")) {
-                        BOOL match_msg_id = TRUE;
-                        if (target_msg_id[0] != '\0') {
-                            match_msg_id = FALSE;
+                        BOOL match = TRUE;
+                        
+                        if (target_msg_id[0] != '\0' || target_text[0] != '\0') {
                             char filepath[MAX_PATH];
                             sprintf(filepath, "%s\\%s", mbox_dir, filename);
                             
                             char* file_content = ReadEntireFile(filepath, session->crypt_key, g_state.encrypt_data);
                             if (file_content) {
-                                if (strstr(file_content, target_msg_id)) match_msg_id = TRUE;
+                                if (target_msg_id[0] != '\0' && !StrStrIA(file_content, target_msg_id)) {
+                                    match = FALSE;
+                                }
+                                if (target_text[0] != '\0' && !StrStrIA(file_content, target_text)) {
+                                    match = FALSE;
+                                }
                                 free(file_content);
+                            } else {
+                                match = FALSE;
                             }
                         }
-                        if (match_msg_id) {
+                        
+                        if (match) {
                             char id_str[32];
                             sprintf(id_str, " %d", is_uid ? uid : seq_num);
                             if (strlen(search_result) + strlen(id_str) < sizeof(search_result) - 2) {
@@ -1276,7 +1298,6 @@ static void CmdSearch(ClientSession* session, const char* tag, ASTNode* args, BO
     SendResponse(session->sock, search_result);
     SendTaggedResponse(session->sock, tag, "OK", "SEARCH completed");
 }
-
 static void CmdFetchEx(ClientSession* session, const char* tag, ASTNode* args, BOOL is_uid) {
     char csv_path[MAX_PATH];
     int max_id = 0;
