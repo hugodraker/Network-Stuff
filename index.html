@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV Calendar Web</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="toolbar">
+        <div class="toolbar-group">
+            <button id="btnZoomIn">+</button>
+            <button id="btnZoomOut">-</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnPrev">&lt; Prev</button>
+            <button id="btnNext">Next &gt;</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnPrevDay">&lt; Day</button>
+            <button id="btnNextDay">Day &gt;</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnPrint">Print</button>
+            <button id="btnExport">Export</button>
+        </div>
+        <select id="comboView">
+            <option value="1">1 Day View</option>
+            <option value="2">4 Day View</option>
+            <option value="3" selected>Week View</option>
+            <option value="4">4 Person View</option>
+            <option value="5">7 Person View</option>
+            <option value="6">Month View</option>
+            <option value="7">Upcoming Schedule</option>
+        </select>
+        <button id="btnDelete">Delete</button>
+        <label><input type="checkbox" id="chkShowAll" checked> Show All</label>
+        <div id="lblDateTitle"></div>
+    </div>
+    
+    <div id="canvas-container">
+        <div id="header-row"></div>
+        <div id="scroll-area">
+            <div id="timeline-labels"></div>
+            <div id="grid-bg"></div>
+            <div id="events-layer"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

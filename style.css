@@ -1,0 +1,53 @@
+* { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; user-select: none; }
+body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #fff; }
+
+#toolbar { height: 50px; background: #f1f3f4; border-bottom: 1px solid #dadce0; display: flex; align-items: center; padding: 0 10px; gap: 10px; }
+.toolbar-group { display: flex; gap: 2px; }
+button { padding: 4px 10px; font-size: 13px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 3px; }
+button:hover { background: #f8f9fa; }
+select { padding: 4px; font-size: 13px; }
+#lblDateTitle { margin-left: auto; font-size: 18px; font-weight: bold; color: #202124; }
+
+#canvas-container { height: calc(100vh - 50px); display: flex; flex-direction: column; }
+#header-row { height: 30px; background: #f8f9fa; border-bottom: 1px solid #dadce0; display: flex; padding-left: 65px; }
+.col-header { flex: 1; text-align: center; font-size: 13px; font-weight: 600; color: #3c4043; line-height: 30px; border-right: 1px solid #dadce0; }
+
+#scroll-area { flex: 1; overflow-y: auto; position: relative; display: flex; }
+#timeline-labels { width: 65px; flex-shrink: 0; position: relative; background: #fff; border-right: 1px solid #dadce0; }
+.time-label { position: absolute; right: 8px; font-size: 12px; color: #70757a; transform: translateY(-50%); }
+
+#grid-bg { flex: 1; position: relative; background-image: linear-gradient(#e0e0e0 1px, transparent 1px), linear-gradient(90deg, #dadce0 1px, transparent 1px); background-size: 100% 60px, calc(100% / 7) 100%; }
+#events-layer { position: absolute; top: 0; left: 65px; right: 0; bottom: 0; pointer-events: none; }
+
+/* Timeline Event Cards */
+.event-card { position: absolute; border-radius: 4px; padding: 4px 8px; font-size: 12px; color: #fff; pointer-events: auto; cursor: grab; box-shadow: 0 1px 3px rgba(0,0,0,0.2); overflow: hidden; display: flex; flex-direction: column; }
+.event-card:active { cursor: grabbing; opacity: 0.9; }
+.event-card.selected { outline: 2px solid #000; z-index: 10; }
+.event-title { font-weight: 600; margin-bottom: 2px; pointer-events: none; }
+.event-time { font-size: 11px; opacity: 0.9; pointer-events: none; }
+
+.resize-handle { position: absolute; bottom: 0; left: 0; right: 0; height: 8px; cursor: ns-resize; background: rgba(0,0,0,0.1); }
+.resize-handle:hover { background: rgba(0,0,0,0.3); }
+
+/* Month View */
+.month-grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: repeat(6, 1fr); height: 100%; width: 100%; }
+.month-cell { border-right: 1px solid #dadce0; border-bottom: 1px solid #dadce0; padding: 4px; position: relative; }
+.month-day-num { text-align: right; font-size: 12px; font-weight: 600; color: #3c4043; margin-bottom: 4px; }
+.month-event { border-radius: 3px; font-size: 11px; padding: 2px 4px; margin-bottom: 2px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+
+/* Upcoming View */
+.upcoming-list { padding: 20px; overflow-y: auto; height: 100%; width: 100%; }
+.upcoming-card { border: 1px solid #dadce0; border-radius: 8px; margin-bottom: 12px; padding: 12px; display: flex; background: #f8f9fa; }
+.upcoming-color { width: 12px; border-radius: 4px; margin-right: 12px; }
+.upcoming-details h3 { margin: 0 0 4px 0; font-size: 16px; color: #202124; }
+.upcoming-details p { margin: 0; font-size: 13px; color: #5f6368; }
+
+/* Print Media Query */
+@media print {
+    #toolbar { display: none !important; }
+    #canvas-container { height: auto; display: block; overflow: visible; }
+    #scroll-area { overflow: visible; height: auto; display: block; }
+    body { background: white; }
+    #grid-bg { background-image: none !important; }
+    .event-card { border: 1px solid #000; box-shadow: none; color: #000 !important; }
+}

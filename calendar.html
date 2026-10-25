@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CalDAV Web Client</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Include jsPDF for vector PDF generation mapping the C GDI logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        .edit-person-input {
+            width: 90%;
+            height: 80%;
+            font-size: 13px;
+            text-align: center;
+            border: 1px solid #1a73e8;
+            outline: none;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <div class="toolbar-group">
+            <button id="btnZoomIn">+</button>
+            <button id="btnZoomOut">-</button>
+        </div>
+        <div class="toolbar-group">
+            <button id="btnPrev">&lt; Prev</button>
+            <button id="btnNext">Next &gt;</button>
+        </div>
+        <select id="comboView">
+            <option value="1">1 Day View</option>
+            <option value="2">4 Day View</option>
+            <option value="3" selected>Week View</option>
+            <option value="4">People View</option>
+            <option value="6">Month View</option>
+            <option value="7">Upcoming Schedule</option>
+        </select>
+        <button id="btnSync">Sync (Download)</button>
+        <button id="btnCopy">Copy Selected</button>
+        <button id="btnDelete">Delete Selected</button>
+        <button id="btnPrint">Print (PDF)</button>
+        <button id="btnExport">Export</button>
+        <div id="lblDateTitle"></div>
+    </div>
+    
+    <div id="canvas-container">
+        <div id="header-row"></div>
+        <div id="scroll-area">
+            <div id="timeline-labels"></div>
+            <div id="grid-bg"></div>
+            <div id="events-layer"></div>
+        </div>
+    </div>
+
+    <script src="calendar.js"></script>
+</body>
+</html>
