@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>CalDAV Web Client</title>
     <link rel="stylesheet" href="style.css">
-    <!-- Include jsPDF for vector PDF generation mapping the C GDI logic -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         .edit-person-input {
@@ -17,6 +19,22 @@
             outline: none;
             border-radius: 3px;
         }
+        .modal { 
+            display: none; 
+            position: fixed; 
+            top: 50%; left: 50%; 
+            transform: translate(-50%, -50%); 
+            background: #fff; 
+            padding: 24px; 
+            border: 1px solid #dadce0; 
+            border-radius: 8px; 
+            z-index: 100; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+            width: 320px; 
+        }
+        .modal h3 { margin-top: 0; color: #202124; }
+        .modal input { width: 100%; margin-bottom: 12px; padding: 6px; border: 1px solid #ccc; border-radius: 4px; }
+        .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
     </style>
 </head>
 <body>
@@ -38,9 +56,10 @@
             <option value="7">Upcoming Schedule</option>
         </select>
         <button id="btnSync">Sync (Download)</button>
+        <button id="btnImportRemote">Import Remote Server</button>
         <button id="btnCopy">Copy Selected</button>
         <button id="btnDelete">Delete Selected</button>
-        <button id="btnPrint">Print (PDF)</button>
+        <button id="btnPrint">Save PDF</button>
         <button id="btnExport">Export</button>
         <div id="lblDateTitle"></div>
     </div>
@@ -51,6 +70,22 @@
             <div id="timeline-labels"></div>
             <div id="grid-bg"></div>
             <div id="events-layer"></div>
+        </div>
+    </div>
+
+    <div id="remoteModal" class="modal">
+        <h3>Import Remote CalDAV</h3>
+        <label>Server URL:</label>
+        <input type="text" id="remUrl" placeholder="http://remote-server.local/calendar/">
+        <label>Port:</label>
+        <input type="text" id="remPort" value="8080">
+        <label>Username:</label>
+        <input type="text" id="remUser">
+        <label>Password:</label>
+        <input type="password" id="remPass">
+        <div class="modal-buttons">
+            <button onclick="document.getElementById('remoteModal').style.display='none'">Cancel</button>
+            <button id="btnDoImport">Import & Save Config</button>
         </div>
     </div>
 
