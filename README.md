@@ -1,4 +1,4 @@
-<div align="center">
+;<div align="center">
 
 # 🌐 Network Stuff
 
@@ -17,7 +17,7 @@ Here is an overview of the network tools, servers, and utilities included in thi
 
 ### 🗄️ File Sharing & Storage Servers
 * **`ftpserver.c` / `ftpserver.exe` & `ftpservergui.c` / `ftpservergui.exe`**: FTP server core and GUI variant.
-* **`ftpsearch.c` / `ftpsearch.exe`**: Utility to search FTP servers or content.
+* **`ftpsearch.c` / `ftpsearch.exe`**: Utility to search FTP servers.
 * **`smb1server.c` / `smb1server.exe`**: SMBv1 protocol server implementation.
 * **`smb2c.c` / `smb2c.exe` & `smb2d.c` / `smb2d.exe` & `smb2server.c` / `smb2server.exe`**: SMBv2 client, daemon, and server utilities.
 * **`dlna_server.c` / `dlna_server.exe` & `dlna2c.c` / `dlna2c.exe`**: DLNA media streaming servers.
@@ -40,7 +40,7 @@ Here is an overview of the network tools, servers, and utilities included in thi
 * **`sync.c` / `sync.exe`**: Data or file synchronization utility.
 * **`shortcutc.c` / `shortcutc.exe`**: Shortcut creation utility.
 * **`gui_compiler.c` / `gui_compiler.exe`**: GUI compilation helper.
-* **`wordis.c` / `wordis.exe`**: Word analysis or text utility.
+* **`wordis.c` / `wordis.exe`**: Runs a command on secret word: launchpad.
 * **`Smd2d.c`**: Additional modular component utility.
 * **`config.ini`**: Global configuration file template.
 
@@ -57,7 +57,7 @@ cd Network-Stuff
 
 ## 📋 Compilation
 
-Most `.c` files are written as standalone applications and can be compiled easily using standard C compilers (such as GCC or MSVC):
+Most `.c` files are written as standalone applications and can be compiled easily using standard C compilers (such as GCC):
 
 ```bash
 gcc chatd.c -o chatd.exe
@@ -65,4 +65,4 @@ gcc chatd.c -o chatd.exe
 
 ## 📝 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the Unlicense.
